@@ -315,6 +315,12 @@ THOUGHTS_EXCLUDE = "exclude"     # без размышлений
 THOUGHTS_INCLUDE = "include"     # размышления внутри сообщений
 THOUGHTS_SEPARATE = "separate"   # размышления отдельным файлом
 
+# фильтр содержимого экспорта
+CONTENT_ALL = "all"              # весь чат
+CONTENT_PROMPTS = "prompts"      # только промты пользователя
+CONTENT_ANSWERS = "answers"      # только ответы модели
+CONTENT_THOUGHTS = "thoughts"    # только размышления модели
+
 USER_LABEL = "ПОЛЬЗОВАТЕЛЬ"
 MODEL_LABEL = "МОДЕЛЬ"
 
@@ -324,6 +330,7 @@ class ExportOptions:
     fmt: str = "txt"                      # "txt" | "html" | "md"
     numbering: bool = True                # нумерация сообщений
     thoughts: str = THOUGHTS_EXCLUDE      # exclude | include | separate
+    content: str = CONTENT_ALL            # all | prompts | answers | thoughts
     timestamps: bool = False              # выводить время сообщений
     metadata: bool = True                 # шапка с моделью/настройками
     attachments: bool = True              # плейсхолдеры вложений + ссылки
@@ -331,6 +338,32 @@ class ExportOptions:
     render_markdown: bool = True          # html: рендерить markdown
     user_label: str = USER_LABEL
     model_label: str = MODEL_LABEL
+    auto_model_label: bool = True         # подпись модели = имя модели из лога
+
+
+def effective_labels(chat: "ChatLog", opts: "ExportOptions"):
+    """Подписи ролей с учётом auto_model_label (имя модели из лога)."""
+    user = opts.user_label or USER_LABEL
+    model = opts.model_label or MODEL_LABEL
+    if opts.auto_model_label and chat.model:
+        model = chat.model
+    return user, model
+
+
+def iter_export_messages(chat: "ChatLog", opts: "ExportOptions"):
+    """Итератор (номер, сообщение) с учётом фильтра содержимого.
+
+    Нумерация всегда глобальная по чату, чтобы «#4 МОДЕЛЬ» совпадало
+    с положением сообщения в полном диалоге.
+    """
+    for num, msg in enumerate(chat.messages, 1):
+        if opts.content == CONTENT_PROMPTS and not msg.is_user:
+            continue
+        if opts.content == CONTENT_ANSWERS and msg.is_user:
+            continue
+        if opts.content == CONTENT_THOUGHTS and not msg.has_thoughts:
+            continue
+        yield num, msg
 
 
 # ----------------------------------------------------------------------------
@@ -493,8 +526,10 @@ def _txt_header(chat: ChatLog, opts: ExportOptions) -> str:
     return "\n".join(lines)
 
 
-def _msg_label(msg: Message, num: Optional[int], opts: ExportOptions) -> str:
-    base = opts.user_label if msg.is_user else opts.model_label
+def _msg_label(msg: Message, num: Optional[int], opts: ExportOptions,
+               labels=None) -> str:
+    user_l, model_l = labels if labels else (opts.user_label, opts.model_label)
+    base = user_l if msg.is_user else model_l
     if msg.role not in ("user", "model"):
         base = msg.role.upper()
     parts = []
@@ -520,21 +555,28 @@ def export_txt(chat: ChatLog, opts: ExportOptions):
     """Возвращает (основной_текст, текст_размышлений_или_None)."""
     out: list = []
     thoughts_out: list = []
+    labels = effective_labels(chat, opts)
+    only_thoughts = opts.content == CONTENT_THOUGHTS
 
     if opts.metadata:
         out.append(_txt_header(chat, opts))
         out.append("")
 
-    if opts.system_instruction and chat.system_instruction:
+    if (opts.system_instruction and chat.system_instruction
+            and opts.content == CONTENT_ALL):
         out.append("--- СИСТЕМНАЯ ИНСТРУКЦИЯ " + "-" * 44)
         out.append(chat.system_instruction)
         out.append("")
 
-    num = 0
-    for msg in chat.messages:
-        num += 1
-        label = _msg_label(msg, num if opts.numbering else None, opts)
+    for num, msg in iter_export_messages(chat, opts):
+        label = _msg_label(msg, num if opts.numbering else None, opts, labels)
         out.append(f"--- {label} " + "-" * max(3, 66 - len(label)))
+
+        if only_thoughts:
+            for t in msg.thoughts:
+                out.append(t.strip())
+            out.append("")
+            continue
 
         if msg.has_thoughts and opts.thoughts == THOUGHTS_INCLUDE:
             out.append("[Размышления]")
@@ -561,7 +603,8 @@ def export_txt(chat: ChatLog, opts: ExportOptions):
 
     main = "\n".join(out).rstrip() + "\n"
     sep = None
-    if opts.thoughts == THOUGHTS_SEPARATE and thoughts_out:
+    if (not only_thoughts and opts.thoughts == THOUGHTS_SEPARATE
+            and thoughts_out):
         head = f"РАЗМЫШЛЕНИЯ МОДЕЛИ — {chat.title}\n" + "=" * 70 + "\n"
         sep = head + "\n".join(thoughts_out).rstrip() + "\n"
     return main, sep
@@ -574,6 +617,8 @@ def export_txt(chat: ChatLog, opts: ExportOptions):
 def export_md(chat: ChatLog, opts: ExportOptions):
     out: list = []
     thoughts_out: list = []
+    labels = effective_labels(chat, opts)
+    only_thoughts = opts.content == CONTENT_THOUGHTS
 
     if opts.metadata:
         out.append(f"# {chat.title}")
@@ -585,16 +630,21 @@ def export_md(chat: ChatLog, opts: ExportOptions):
         out.append("  \n".join(meta))
         out.append("")
 
-    if opts.system_instruction and chat.system_instruction:
+    if (opts.system_instruction and chat.system_instruction
+            and opts.content == CONTENT_ALL):
         out.append("## Системная инструкция")
         out.append(chat.system_instruction)
         out.append("")
 
-    num = 0
-    for msg in chat.messages:
-        num += 1
-        label = _msg_label(msg, num if opts.numbering else None, opts)
+    for num, msg in iter_export_messages(chat, opts):
+        label = _msg_label(msg, num if opts.numbering else None, opts, labels)
         out.append(f"## {label}")
+
+        if only_thoughts:
+            for t in msg.thoughts:
+                out.append(t.strip())
+            out.append("")
+            continue
 
         if msg.has_thoughts and opts.thoughts == THOUGHTS_INCLUDE:
             for t in msg.thoughts:
@@ -622,7 +672,8 @@ def export_md(chat: ChatLog, opts: ExportOptions):
 
     main = "\n".join(out).rstrip() + "\n"
     sep = None
-    if opts.thoughts == THOUGHTS_SEPARATE and thoughts_out:
+    if (not only_thoughts and opts.thoughts == THOUGHTS_SEPARATE
+            and thoughts_out):
         sep = (f"# Размышления модели — {chat.title}\n\n"
                + "\n".join(thoughts_out).rstrip() + "\n")
     return main, sep
@@ -700,6 +751,8 @@ def _body_html(text: str, opts: ExportOptions) -> str:
 def export_html(chat: ChatLog, opts: ExportOptions):
     out: list = []
     thoughts_out: list = []
+    labels = effective_labels(chat, opts)
+    only_thoughts = opts.content == CONTENT_THOUGHTS
 
     out.append("<!DOCTYPE html>")
     out.append('<html lang="ru"><head><meta charset="utf-8">')
@@ -718,16 +771,16 @@ def export_html(chat: ChatLog, opts: ExportOptions):
                     f"(промтов: {chat.user_count}, ответов: {chat.model_count})")
         out.append(f"<div class='meta'>{' &middot; '.join(meta)}</div>")
 
-    if opts.system_instruction and chat.system_instruction:
+    if (opts.system_instruction and chat.system_instruction
+            and opts.content == CONTENT_ALL):
         out.append("<div class='sysinstr'><div class='hdr'>Системная инструкция</div>")
         out.append(_body_html(chat.system_instruction, opts))
         out.append("</div>")
 
-    num = 0
-    for msg in chat.messages:
-        num += 1
+    user_l, model_l = labels
+    for num, msg in iter_export_messages(chat, opts):
         cls = "user" if msg.is_user else "model"
-        who = opts.user_label if msg.is_user else opts.model_label
+        who = user_l if msg.is_user else model_l
         if msg.role not in ("user", "model"):
             who = msg.role
         hdr = []
@@ -740,13 +793,19 @@ def export_html(chat: ChatLog, opts: ExportOptions):
 
         out.append(f"<div class='msg {cls}'><div class='hdr'>{''.join(hdr)}</div>")
 
+        if only_thoughts:
+            for t in msg.thoughts:
+                out.append(_body_html(t.strip(), opts))
+            out.append("</div>")
+            continue
+
         if msg.has_thoughts and opts.thoughts == THOUGHTS_INCLUDE:
             out.append("<details class='thought'><summary>Размышления модели</summary>")
             for t in msg.thoughts:
                 out.append(_body_html(t.strip(), opts))
             out.append("</details>")
         if msg.has_thoughts and opts.thoughts == THOUGHTS_SEPARATE:
-            label = _msg_label(msg, num if opts.numbering else None, opts)
+            label = _msg_label(msg, num if opts.numbering else None, opts, labels)
             thoughts_out.append(f"<div class='msg model'><div class='hdr'>"
                                 f"<span class='who'>{_html.escape(label)}</span></div>")
             for t in msg.thoughts:
@@ -772,7 +831,8 @@ def export_html(chat: ChatLog, opts: ExportOptions):
     main = "\n".join(out)
 
     sep = None
-    if opts.thoughts == THOUGHTS_SEPARATE and thoughts_out:
+    if (not only_thoughts and opts.thoughts == THOUGHTS_SEPARATE
+            and thoughts_out):
         sep = ("<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
                f"<title>Размышления — {_html.escape(chat.title)}</title>"
                f"<style>{_HTML_CSS}</style></head><body><div class='wrap'>"
@@ -797,11 +857,19 @@ def export_chat(chat: ChatLog, opts: ExportOptions):
     return fn(chat, opts)
 
 
+_CONTENT_SUFFIX = {
+    CONTENT_PROMPTS: "_prompts",
+    CONTENT_ANSWERS: "_answers",
+    CONTENT_THOUGHTS: "_thoughts_only",
+}
+
+
 def export_to_files(chat: ChatLog, opts: ExportOptions, out_dir, base_name=None):
     """Пишет файлы на диск, возвращает список созданных путей."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     base = base_name or (Path(chat.path).stem if chat.path else chat.title) or "chat"
+    base += _CONTENT_SUFFIX.get(opts.content, "")
     main, sep = export_chat(chat, opts)
     ext = EXT[opts.fmt]
     created = []
@@ -818,29 +886,36 @@ def export_to_files(chat: ChatLog, opts: ExportOptions, out_dir, base_name=None)
 COPY_ALL = "all"
 COPY_PROMPTS = "prompts"
 COPY_ANSWERS = "answers"
+COPY_THOUGHTS = "thoughts"
 
 
 def chat_to_clipboard_text(chat: ChatLog, which: str = COPY_ALL,
                            opts: Optional[ExportOptions] = None) -> str:
-    """Текст для копирования: весь чат / только промты / только ответы."""
+    """Текст для копирования: весь чат / промты / ответы / размышления."""
     opts = opts or ExportOptions(fmt="txt", metadata=False,
                                  system_instruction=False)
     if which == COPY_ALL:
-        o = ExportOptions(**{**opts.__dict__, "fmt": "txt"})
+        o = ExportOptions(**{**opts.__dict__, "fmt": "txt",
+                             "content": CONTENT_ALL})
         return export_txt(chat, o)[0]
 
+    labels = effective_labels(chat, opts)
     out = []
-    num = 0
-    for msg in chat.messages:
-        num += 1
+    for num, msg in enumerate(chat.messages, 1):
         if which == COPY_PROMPTS and not msg.is_user:
             continue
         if which == COPY_ANSWERS and msg.is_user:
             continue
+        if which == COPY_THOUGHTS and not msg.has_thoughts:
+            continue
         chunk = []
         if opts.numbering:
-            label = _msg_label(msg, num, opts)
+            label = _msg_label(msg, num, opts, labels)
             chunk.append(f"--- {label} ---")
+        if which == COPY_THOUGHTS:
+            chunk.extend(t.strip() for t in msg.thoughts)
+            out.append("\n".join(chunk))
+            continue
         if msg.has_thoughts and opts.thoughts == THOUGHTS_INCLUDE:
             chunk.append("[Размышления]")
             chunk.extend(t.strip() for t in msg.thoughts)
@@ -854,8 +929,11 @@ def chat_to_clipboard_text(chat: ChatLog, which: str = COPY_ALL,
     return "\n\n".join(out).strip() + ("\n" if out else "")
 
 
-def message_copy_text(msg: Message, include_thoughts: bool = False) -> str:
-    """Текст одного сообщения для кнопки «Копировать»."""
+def message_copy_text(msg: Message, include_thoughts: bool = False,
+                      thoughts_only: bool = False) -> str:
+    """Текст одного сообщения для кнопок «Копировать»."""
+    if thoughts_only:
+        return "\n\n".join(t.strip() for t in msg.thoughts)
     parts = []
     if include_thoughts and msg.has_thoughts:
         parts.append("[Размышления]")
