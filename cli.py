@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 
 import core
+import i18n
+from i18n import tr
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,10 +90,13 @@ def _add_export_args(p):
                    help="HTML: не рендерить Markdown")
     p.add_argument("--no-recursive", action="store_true",
                    help="Не заходить в подпапки")
-    p.add_argument("--user-label", default=core.USER_LABEL,
+    p.add_argument("--user-label", default=None,
                    help="Подпись пользователя")
     p.add_argument("--model-label", default=None,
                    help="Подпись модели (по умолчанию — имя модели из лога)")
+    p.add_argument("--lang", choices=sorted(i18n.LANGS),
+                   default=i18n.DEFAULT_LANG,
+                   help="Язык служебных подписей экспорта (ru/en)")
 
 
 def collect_files(inputs, recursive: bool) -> list:
@@ -116,6 +121,7 @@ def collect_files(inputs, recursive: bool) -> list:
 
 
 def cmd_export(args) -> int:
+    i18n.set_lang(args.lang)
     files = collect_files(args.input, recursive=not args.no_recursive)
     if not files:
         print("Нет файлов для обработки.")
@@ -130,8 +136,8 @@ def cmd_export(args) -> int:
         metadata=not args.no_metadata,
         attachments=not args.no_attachments,
         render_markdown=not args.no_markdown,
-        user_label=args.user_label,
-        model_label=args.model_label or core.MODEL_LABEL,
+        user_label=args.user_label or tr("user"),
+        model_label=args.model_label or tr("model"),
         auto_model_label=args.model_label is None,
     )
 

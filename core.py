@@ -25,18 +25,22 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote as _urlquote
+
+from i18n import tr
 
 # ----------------------------------------------------------------------------
 # Модель данных
 # ----------------------------------------------------------------------------
 
+# ключ из JSON -> ключ локализации подписи
 ATTACHMENT_KINDS = {
-    "driveImage": "Изображение",
-    "driveDocument": "Документ",
-    "driveVideo": "Видео",
-    "driveAudio": "Аудио",
-    "driveFile": "Файл",
-    "youtubeVideo": "YouTube-видео",
+    "driveImage": "att_image",
+    "driveDocument": "att_document",
+    "driveVideo": "att_video",
+    "driveAudio": "att_audio",
+    "driveFile": "att_file",
+    "youtubeVideo": "att_youtube",
 }
 
 
@@ -47,15 +51,17 @@ class Attachment:
 
     @property
     def label(self) -> str:
-        return ATTACHMENT_KINDS.get(self.kind, "Вложение")
+        return tr(ATTACHMENT_KINDS.get(self.kind, "att_generic"))
 
     @property
     def url(self) -> str:
         if not self.drive_id:
             return ""
+        # id берётся из внешнего JSON — экранируем на случай «злого» лога
+        safe_id = _urlquote(self.drive_id, safe="")
         if self.kind == "youtubeVideo":
-            return f"https://www.youtube.com/watch?v={self.drive_id}"
-        return f"https://drive.google.com/file/d/{self.drive_id}/view"
+            return f"https://www.youtube.com/watch?v={safe_id}"
+        return f"https://drive.google.com/file/d/{safe_id}/view"
 
 
 @dataclass
@@ -104,7 +110,8 @@ class ChatLog:
 
     @property
     def model_count(self) -> int:
-        return sum(1 for m in self.messages if not m.is_user)
+        # именно роль "model": неизвестные роли не считаем «ответами»
+        return sum(1 for m in self.messages if m.role == "model")
 
     @property
     def thought_count(self) -> int:
@@ -149,10 +156,10 @@ def _chunk_attachments(chunk: dict) -> list:
 def parse_data(data: dict, path: str = "") -> ChatLog:
     """Разбирает уже загруженный JSON-объект лога AI Studio."""
     if not isinstance(data, dict):
-        raise ParseError("Корень JSON — не объект; это не похоже на лог AI Studio.")
+        raise ParseError(tr("core_err_root"))
 
     chat = ChatLog(path=path, raw=data)
-    chat.title = Path(path).stem if path else "Без названия"
+    chat.title = Path(path).stem if path else tr("core_untitled")
 
     rs = data.get("runSettings")
     if isinstance(rs, dict):
@@ -184,17 +191,14 @@ def parse_data(data: dict, path: str = "") -> ChatLog:
                 chunks = data[alt]
                 break
     if not isinstance(chunks, list):
-        raise ParseError(
-            "Не найден список сообщений (chunkedPrompt.chunks). "
-            "Файл не похож на лог Google AI Studio."
-        )
+        raise ParseError(tr("core_err_no_chunks"))
 
     pending_thoughts: list = []
     pending_meta: dict = {}
 
     for idx, chunk in enumerate(chunks):
         if not isinstance(chunk, dict):
-            chat.warnings.append(f"Чанк #{idx}: не объект, пропущен.")
+            chat.warnings.append(tr("core_warn_chunk", idx=idx))
             continue
 
         role = chunk.get("role") or "unknown"
@@ -257,12 +261,10 @@ def parse_data(data: dict, path: str = "") -> ChatLog:
                 create_time=pending_meta.get("create_time", ""),
             )
         )
-        chat.warnings.append(
-            "В конце лога есть размышления без итогового ответа модели."
-        )
+        chat.warnings.append(tr("core_warn_dangling"))
 
     if not chat.messages:
-        chat.warnings.append("Лог не содержит сообщений.")
+        chat.warnings.append(tr("core_warn_empty"))
     return chat
 
 
@@ -279,7 +281,7 @@ def parse_file(path) -> ChatLog:
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             last_err = e
     if data is None:
-        raise ParseError(f"Не удалось прочитать JSON: {last_err}")
+        raise ParseError(tr("core_err_json", err=last_err))
     return parse_data(data, str(p))
 
 
@@ -292,7 +294,8 @@ def looks_like_log(path) -> bool:
                             ".pdf", ".mp4", ".mp3", ".docx", ".xlsx"}:
         return False
     try:
-        head = p.read_bytes()[:4096].decode("utf-8", errors="ignore").lstrip()
+        with p.open("rb") as fh:
+            head = fh.read(4096).decode("utf-8", errors="ignore").lstrip()
     except OSError:
         return False
     return head.startswith("{") and (
@@ -321,6 +324,8 @@ CONTENT_PROMPTS = "prompts"      # только промты пользоват�
 CONTENT_ANSWERS = "answers"      # только ответы модели
 CONTENT_THOUGHTS = "thoughts"    # только размышления модели
 
+# Статические значения по умолчанию (для обратной совместимости).
+# Актуальные локализованные подписи дают tr("user") / tr("model").
 USER_LABEL = "ПОЛЬЗОВАТЕЛЬ"
 MODEL_LABEL = "МОДЕЛЬ"
 
@@ -505,9 +510,9 @@ def _txt_header(chat: ChatLog, opts: ExportOptions) -> str:
     lines = []
     bar = "=" * 70
     lines.append(bar)
-    lines.append(f"  Чат: {chat.title}")
+    lines.append(f"  {tr('core_chat')}: {chat.title}")
     if chat.model:
-        lines.append(f"  Модель: {chat.model}")
+        lines.append(f"  {tr('core_model')}: {chat.model}")
     rs = chat.run_settings
     extra = []
     if "temperature" in rs:
@@ -519,9 +524,9 @@ def _txt_header(chat: ChatLog, opts: ExportOptions) -> str:
     if "maxOutputTokens" in rs:
         extra.append(f"maxOutputTokens={rs['maxOutputTokens']}")
     if extra:
-        lines.append(f"  Параметры: {', '.join(extra)}")
-    lines.append(f"  Сообщений: {len(chat.messages)} "
-                 f"(промтов: {chat.user_count}, ответов: {chat.model_count})")
+        lines.append(f"  {tr('core_params')}: {', '.join(extra)}")
+    lines.append("  " + tr("core_msgs_count", n=len(chat.messages),
+                            u=chat.user_count, m=chat.model_count))
     lines.append(bar)
     return "\n".join(lines)
 
@@ -545,9 +550,9 @@ def _attachment_lines(msg: Message) -> list:
     out = []
     for a in msg.attachments:
         if a.url:
-            out.append(f"[Вложение: {a.label}] {a.url}")
+            out.append(f"[{tr('core_attachment')}: {a.label}] {a.url}")
         else:
-            out.append(f"[Вложение: {a.label}]")
+            out.append(f"[{tr('core_attachment')}: {a.label}]")
     return out
 
 
@@ -564,7 +569,7 @@ def export_txt(chat: ChatLog, opts: ExportOptions):
 
     if (opts.system_instruction and chat.system_instruction
             and opts.content == CONTENT_ALL):
-        out.append("--- СИСТЕМНАЯ ИНСТРУКЦИЯ " + "-" * 44)
+        out.append(f"--- {tr('core_sysinstr_upper')} " + "-" * 44)
         out.append(chat.system_instruction)
         out.append("")
 
@@ -579,10 +584,10 @@ def export_txt(chat: ChatLog, opts: ExportOptions):
             continue
 
         if msg.has_thoughts and opts.thoughts == THOUGHTS_INCLUDE:
-            out.append("[Размышления]")
+            out.append(f"[{tr('core_thoughts_tag')}]")
             for t in msg.thoughts:
                 out.append(t.strip())
-            out.append("[/Размышления]")
+            out.append(f"[/{tr('core_thoughts_tag')}]")
             out.append("")
         if msg.has_thoughts and opts.thoughts == THOUGHTS_SEPARATE:
             head = f"=== {label} ==="
@@ -598,14 +603,14 @@ def export_txt(chat: ChatLog, opts: ExportOptions):
         if text:
             out.append(text)
         elif not msg.attachments and not msg.has_thoughts:
-            out.append("[пустое сообщение]")
+            out.append(f"[{tr('empty_message_plain')}]")
         out.append("")
 
     main = "\n".join(out).rstrip() + "\n"
     sep = None
     if (not only_thoughts and opts.thoughts == THOUGHTS_SEPARATE
             and thoughts_out):
-        head = f"РАЗМЫШЛЕНИЯ МОДЕЛИ — {chat.title}\n" + "=" * 70 + "\n"
+        head = f"{tr('core_thoughts_upper')} — {chat.title}\n" + "=" * 70 + "\n"
         sep = head + "\n".join(thoughts_out).rstrip() + "\n"
     return main, sep
 
@@ -624,15 +629,15 @@ def export_md(chat: ChatLog, opts: ExportOptions):
         out.append(f"# {chat.title}")
         meta = []
         if chat.model:
-            meta.append(f"**Модель:** `{chat.model}`")
-        meta.append(f"**Сообщений:** {len(chat.messages)} "
-                    f"(промтов: {chat.user_count}, ответов: {chat.model_count})")
+            meta.append(f"**{tr('core_model')}:** `{chat.model}`")
+        meta.append("**" + tr("core_msgs_count", n=len(chat.messages),
+                           u=chat.user_count, m=chat.model_count) + "**")
         out.append("  \n".join(meta))
         out.append("")
 
     if (opts.system_instruction and chat.system_instruction
             and opts.content == CONTENT_ALL):
-        out.append("## Системная инструкция")
+        out.append(f"## {tr('system_instruction')}")
         out.append(chat.system_instruction)
         out.append("")
 
@@ -648,7 +653,7 @@ def export_md(chat: ChatLog, opts: ExportOptions):
 
         if msg.has_thoughts and opts.thoughts == THOUGHTS_INCLUDE:
             for t in msg.thoughts:
-                out.append("> **Размышления:**")
+                out.append(f"> **{tr('core_thoughts_tag')}:**")
                 for ln in t.strip().split("\n"):
                     out.append(f"> {ln}")
                 out.append("")
@@ -661,9 +666,9 @@ def export_md(chat: ChatLog, opts: ExportOptions):
         if opts.attachments and msg.attachments:
             for a in msg.attachments:
                 if a.url:
-                    out.append(f"*[Вложение: {a.label}]({a.url})*")
+                    out.append(f"*[{tr('core_attachment')}: {a.label}]({a.url})*")
                 else:
-                    out.append(f"*[Вложение: {a.label}]*")
+                    out.append(f"*[{tr('core_attachment')}: {a.label}]*")
             out.append("")
 
         if msg.text.strip():
@@ -674,7 +679,7 @@ def export_md(chat: ChatLog, opts: ExportOptions):
     sep = None
     if (not only_thoughts and opts.thoughts == THOUGHTS_SEPARATE
             and thoughts_out):
-        sep = (f"# Размышления модели — {chat.title}\n\n"
+        sep = (f"# {tr('core_model_thoughts')} — {chat.title}\n\n"
                + "\n".join(thoughts_out).rstrip() + "\n")
     return main, sep
 
@@ -763,17 +768,18 @@ def export_html(chat: ChatLog, opts: ExportOptions):
         out.append(f"<h1 class='title'>{_html.escape(chat.title)}</h1>")
         meta = []
         if chat.model:
-            meta.append(f"Модель: <b>{_html.escape(chat.model)}</b>")
+            meta.append(f"{tr('core_model')}: <b>{_html.escape(chat.model)}</b>")
         rs = chat.run_settings
         if "temperature" in rs:
             meta.append(f"temperature={rs['temperature']}")
-        meta.append(f"сообщений: {len(chat.messages)} "
-                    f"(промтов: {chat.user_count}, ответов: {chat.model_count})")
+        meta.append(_html.escape(tr("core_msgs_count", n=len(chat.messages),
+                                 u=chat.user_count, m=chat.model_count)))
         out.append(f"<div class='meta'>{' &middot; '.join(meta)}</div>")
 
     if (opts.system_instruction and chat.system_instruction
             and opts.content == CONTENT_ALL):
-        out.append("<div class='sysinstr'><div class='hdr'>Системная инструкция</div>")
+        out.append(f"<div class='sysinstr'><div class='hdr'>"
+                   f"{_html.escape(tr('system_instruction'))}</div>")
         out.append(_body_html(chat.system_instruction, opts))
         out.append("</div>")
 
@@ -800,7 +806,8 @@ def export_html(chat: ChatLog, opts: ExportOptions):
             continue
 
         if msg.has_thoughts and opts.thoughts == THOUGHTS_INCLUDE:
-            out.append("<details class='thought'><summary>Размышления модели</summary>")
+            out.append(f"<details class='thought'><summary>"
+                       f"{_html.escape(tr('core_model_thoughts'))}</summary>")
             for t in msg.thoughts:
                 out.append(_body_html(t.strip(), opts))
             out.append("</details>")
@@ -815,15 +822,18 @@ def export_html(chat: ChatLog, opts: ExportOptions):
         if opts.attachments and msg.attachments:
             for a in msg.attachments:
                 if a.url:
-                    out.append(f"<span class='att'>📎 <a href='{a.url}' "
-                               f"target='_blank'>{a.label}</a></span>")
+                    out.append(
+                        f"<span class='att'>📎 "
+                        f"<a href='{_html.escape(a.url, quote=True)}' "
+                        f"target='_blank'>{_html.escape(a.label)}</a></span>")
                 else:
-                    out.append(f"<span class='att'>📎 {a.label}</span>")
+                    out.append(f"<span class='att'>📎 "
+                               f"{_html.escape(a.label)}</span>")
 
         if msg.text.strip():
             out.append(_body_html(msg.text.strip(), opts))
         elif not msg.attachments and not msg.has_thoughts:
-            out.append("<div class='empty'>[пустое сообщение]</div>")
+            out.append(f"<div class='empty'>[{_html.escape(tr('empty_message_plain'))}]</div>")
 
         out.append("</div>")
 
@@ -834,9 +844,9 @@ def export_html(chat: ChatLog, opts: ExportOptions):
     if (not only_thoughts and opts.thoughts == THOUGHTS_SEPARATE
             and thoughts_out):
         sep = ("<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
-               f"<title>Размышления — {_html.escape(chat.title)}</title>"
+               f"<title>{_html.escape(tr('core_thoughts_sep_title', title=chat.title))}</title>"
                f"<style>{_HTML_CSS}</style></head><body><div class='wrap'>"
-               f"<h1 class='title'>Размышления модели — {_html.escape(chat.title)}</h1>"
+               f"<h1 class='title'>{_html.escape(tr('core_model_thoughts'))} — {_html.escape(chat.title)}</h1>"
                + "\n".join(thoughts_out) + "</div></body></html>")
     return main, sep
 
@@ -957,7 +967,7 @@ def export_chat(chat: ChatLog, opts: ExportOptions):
     """Возвращает (основной_документ, документ_размышлений_или_None)."""
     fn = _EXPORTERS.get(opts.fmt)
     if fn is None:
-        raise ValueError(f"Неизвестный формат: {opts.fmt}")
+        raise ValueError(tr("core_err_unknown_fmt", fmt=opts.fmt))
     return fn(chat, opts)
 
 
@@ -1021,9 +1031,9 @@ def chat_to_clipboard_text(chat: ChatLog, which: str = COPY_ALL,
             out.append("\n".join(chunk))
             continue
         if msg.has_thoughts and opts.thoughts == THOUGHTS_INCLUDE:
-            chunk.append("[Размышления]")
+            chunk.append(f"[{tr('core_thoughts_tag')}]")
             chunk.extend(t.strip() for t in msg.thoughts)
-            chunk.append("[/Размышления]")
+            chunk.append(f"[/{tr('core_thoughts_tag')}]")
         if opts.attachments and msg.attachments:
             chunk.extend(_attachment_lines(msg))
         if msg.text.strip():
@@ -1040,9 +1050,9 @@ def message_copy_text(msg: Message, include_thoughts: bool = False,
         return "\n\n".join(t.strip() for t in msg.thoughts)
     parts = []
     if include_thoughts and msg.has_thoughts:
-        parts.append("[Размышления]")
+        parts.append(f"[{tr('core_thoughts_tag')}]")
         parts.extend(t.strip() for t in msg.thoughts)
-        parts.append("[/Размышления]")
+        parts.append(f"[/{tr('core_thoughts_tag')}]")
     for ln in _attachment_lines(msg):
         parts.append(ln)
     if msg.text.strip():

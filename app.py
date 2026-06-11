@@ -355,8 +355,9 @@ class MessageCard(QFrame):
         # вложения
         for a in msg.attachments:
             al = QLabel(
-                f"📎 <a href='{a.url}'>{a.label} (Google Drive)</a>"
-                if a.url else f"📎 {a.label}"
+                f"📎 <a href='{_html.escape(a.url, quote=True)}'>"
+                f"{_html.escape(a.label)} (Google Drive)</a>"
+                if a.url else f"📎 {_html.escape(a.label)}"
             )
             al.setTextFormat(Qt.RichText)
             al.setOpenExternalLinks(True)
@@ -422,7 +423,11 @@ class MainWindow(QMainWindow):
         self.theme_name = self.settings.value("ui/theme", "dark")
         self.render_md = self.settings.value("ui/render_md", "true") == "true"
         self.show_thoughts = self.settings.value("ui/show_thoughts", "true") == "true"
-        self.zoom = int(self.settings.value("ui/zoom", 100))
+        try:
+            self.zoom = int(self.settings.value("ui/zoom", 100))
+        except (TypeError, ValueError):
+            self.zoom = 100
+        self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, self.zoom))
         i18n.set_lang(self.settings.value("ui/lang", "ru"))
 
         self.chats: list = []
@@ -579,7 +584,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
 
-        # горячие клавиши
+        # горячие клавиши (при пересборке UI старые экшены убираем,
+        # иначе Qt получит дублирующиеся «ambiguous» шорткаты)
+        for old in getattr(self, "_shortcut_actions", []):
+            self.removeAction(old)
+        self._shortcut_actions = []
         for seq, fn in (
             (QKeySequence.Open, self.open_files),
             (QKeySequence.ZoomIn, lambda: self.set_zoom(self.zoom + ZOOM_STEP)),
@@ -591,6 +600,7 @@ class MainWindow(QMainWindow):
             act.setShortcut(seq)
             act.triggered.connect(fn)
             self.addAction(act)
+            self._shortcut_actions.append(act)
 
     def _build_search_tab(self) -> QWidget:
         w = QWidget()
@@ -627,8 +637,9 @@ class MainWindow(QMainWindow):
 
         self.search_results = QListWidget()
         self.search_results.setWordWrap(True)
+        # только itemActivated: на всех платформах срабатывает и по
+        # дабл-клику, и по Enter; вместе с itemDoubleClicked открывало дважды
         self.search_results.itemActivated.connect(self._open_search_hit)
-        self.search_results.itemDoubleClicked.connect(self._open_search_hit)
         v.addWidget(self.search_results, 1)
 
         hint = QLabel(tr("search_hint"))
