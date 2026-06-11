@@ -162,6 +162,8 @@ class ExportDialog(QDialog):
         self.cmb_fmt.addItem(tr("exp_fmt_txt"), "txt")
         self.cmb_fmt.addItem(tr("exp_fmt_html"), "html")
         self.cmb_fmt.addItem(tr("exp_fmt_md"), "md")
+        self.cmb_fmt.addItem(tr("exp_fmt_json"), "json")
+        self.cmb_fmt.addItem(tr("exp_fmt_jsonl"), "jsonl")
         f.addRow(tr("exp_format_file"), self.cmb_fmt)
         self.cmb_content = QComboBox()
         self.cmb_content.addItem(tr("exp_content_all"), core.CONTENT_ALL)
@@ -606,6 +608,7 @@ class MainWindow(QMainWindow):
         self.cmb_scope.addItem(tr("search_scope_user"), "user")
         self.cmb_scope.addItem(tr("search_scope_model"), "model")
         self.cmb_scope.addItem(tr("search_scope_thoughts"), "thoughts")
+        self.cmb_scope.addItem(tr("search_scope_txt"), "txt")
         row1.addWidget(self.cmb_scope)
         b_search = QPushButton(tr("search_btn"))
         b_search.setObjectName("accent")
@@ -997,16 +1000,18 @@ class MainWindow(QMainWindow):
         if not q:
             return
         scope = self.cmb_scope.currentData()
-        role, thoughts = None, None
+        role, thoughts, kind = None, None, None
         if scope == "user":
             role, thoughts = "user", False
         elif scope == "model":
             role, thoughts = "model", False
         elif scope == "thoughts":
             thoughts = True
+        elif scope == "txt":
+            kind = "txt"
         try:
             hits = self._get_index().search(q, role=role, thoughts=thoughts,
-                                            limit=200)
+                                            kind=kind, limit=200)
         except Exception as ex:
             QMessageBox.warning(self, APP_NAME, str(ex))
             return
@@ -1016,22 +1021,33 @@ class MainWindow(QMainWindow):
             self.search_results.addItem(it)
             return
         for h in hits:
-            kind = "💭" if h.is_thought else ("👤" if h.role == "user" else "🤖")
+            if h.kind == "txt":
+                icon = "📄"
+            else:
+                icon = ("💭" if h.is_thought
+                        else ("👤" if h.role == "user" else "🤖"))
             it = QListWidgetItem(
-                f"{kind} {h.title}  ·  {h.model or '—'}  ·  #{h.msg_num}\n"
+                f"{icon} {h.title}  ·  {h.model or '—'}  ·  #{h.msg_num}\n"
                 f"{h.snippet}")
             it.setToolTip(h.path)
-            it.setData(Qt.UserRole, h.path)
+            it.setData(Qt.UserRole, (h.path, h.kind))
             self.search_results.addItem(it)
         self.statusBar().showMessage(
             tr("search_results_n", n=len(hits)), 5000)
 
     def _open_search_hit(self, item):
-        path = item.data(Qt.UserRole)
-        if not path:
+        data = item.data(Qt.UserRole)
+        if not data:
             return
+        path, kind = data if isinstance(data, tuple) else (data, "log")
         if not Path(path).exists():
             QMessageBox.warning(self, APP_NAME, f"404: {path}")
+            return
+        if kind == "txt":
+            # текстовый файл — открываем системным приложением
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
             return
         self.load_paths([path], select_path=path)
         self.tabs.setCurrentIndex(0)

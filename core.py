@@ -842,11 +842,115 @@ def export_html(chat: ChatLog, opts: ExportOptions):
 
 
 # ----------------------------------------------------------------------------
+# Экспорт: JSON / JSONL (чистая структура без служебного мусора)
+# ----------------------------------------------------------------------------
+
+def _message_to_dict(num: int, msg: Message, opts: ExportOptions) -> dict:
+    d: dict = {"index": num, "role": msg.role}
+    if msg.text.strip():
+        d["text"] = msg.text.strip()
+    if msg.has_thoughts and opts.thoughts != THOUGHTS_EXCLUDE:
+        d["thoughts"] = [t.strip() for t in msg.thoughts]
+    if opts.attachments and msg.attachments:
+        d["attachments"] = [
+            {"kind": a.kind, "label": a.label,
+             **({"id": a.drive_id} if a.drive_id else {}),
+             **({"url": a.url} if a.url else {})}
+            for a in msg.attachments
+        ]
+    if opts.timestamps and msg.create_time:
+        d["time"] = msg.create_time
+    if msg.token_count:
+        d["tokens"] = msg.token_count
+    if msg.finish_reason:
+        d["finish_reason"] = msg.finish_reason
+    return d
+
+
+def _json_doc(chat: ChatLog, opts: ExportOptions) -> dict:
+    doc: dict = {"title": chat.title}
+    if opts.metadata:
+        if chat.model:
+            doc["model"] = chat.model
+        if chat.path:
+            doc["source_file"] = chat.path
+        rs = chat.run_settings
+        settings = {k: rs[k] for k in
+                    ("temperature", "topP", "topK", "maxOutputTokens")
+                    if k in rs}
+        if settings:
+            doc["settings"] = settings
+        doc["stats"] = {
+            "messages": len(chat.messages),
+            "prompts": chat.user_count,
+            "answers": chat.model_count,
+            "thoughts": chat.thought_count,
+        }
+    if (opts.system_instruction and chat.system_instruction
+            and opts.content == CONTENT_ALL):
+        doc["system_instruction"] = chat.system_instruction
+
+    msgs = []
+    for num, msg in iter_export_messages(chat, opts):
+        if opts.content == CONTENT_THOUGHTS:
+            msgs.append({"index": num, "role": msg.role,
+                         "thoughts": [t.strip() for t in msg.thoughts]})
+        else:
+            msgs.append(_message_to_dict(num, msg, opts))
+    doc["messages"] = msgs
+    return doc
+
+
+def export_json(chat: ChatLog, opts: ExportOptions):
+    """Чистый JSON: метаданные + messages[]. Размышления — по настройке.
+
+    При thoughts=separate основной файл идёт без размышлений, а вторым
+    документом возвращается JSON только с размышлениями.
+    """
+    sep_doc = None
+    if opts.content != CONTENT_THOUGHTS and opts.thoughts == THOUGHTS_SEPARATE:
+        main_opts = ExportOptions(**{**opts.__dict__,
+                                     "thoughts": THOUGHTS_EXCLUDE})
+        doc = _json_doc(chat, main_opts)
+        th_msgs = [{"index": n, "role": m.role,
+                    "thoughts": [t.strip() for t in m.thoughts]}
+                   for n, m in iter_export_messages(chat, opts)
+                   if m.has_thoughts]
+        if th_msgs:
+            sep_doc = json.dumps({"title": chat.title,
+                                  "kind": "thoughts",
+                                  "messages": th_msgs},
+                                 ensure_ascii=False, indent=2) + "\n"
+    else:
+        doc = _json_doc(chat, opts)
+    return json.dumps(doc, ensure_ascii=False, indent=2) + "\n", sep_doc
+
+
+def export_jsonl(chat: ChatLog, opts: ExportOptions):
+    """JSONL: одна строка — одно сообщение. Удобно для скриптов/пайплайнов."""
+    lines = []
+    for num, msg in iter_export_messages(chat, opts):
+        if opts.content == CONTENT_THOUGHTS:
+            d = {"index": num, "role": msg.role,
+                 "thoughts": [t.strip() for t in msg.thoughts]}
+        else:
+            d = _message_to_dict(num, msg, opts)
+        if opts.metadata:
+            d["chat"] = chat.title
+            if chat.model:
+                d["model"] = chat.model
+        lines.append(json.dumps(d, ensure_ascii=False))
+    return "\n".join(lines) + "\n", None
+
+
+# ----------------------------------------------------------------------------
 # Универсальный экспорт и копирование
 # ----------------------------------------------------------------------------
 
-_EXPORTERS = {"txt": export_txt, "html": export_html, "md": export_md}
-EXT = {"txt": ".txt", "html": ".html", "md": ".md"}
+_EXPORTERS = {"txt": export_txt, "html": export_html, "md": export_md,
+              "json": export_json, "jsonl": export_jsonl}
+EXT = {"txt": ".txt", "html": ".html", "md": ".md",
+       "json": ".json", "jsonl": ".jsonl"}
 
 
 def export_chat(chat: ChatLog, opts: ExportOptions):

@@ -40,14 +40,20 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--no-recursive", action="store_true")
     pi.add_argument("--clear", action="store_true",
                     help="Очистить индекс перед индексацией")
+    pi.add_argument("--no-txt", action="store_true",
+                    help="Не индексировать обычные txt/md файлы")
+    pi.add_argument("--no-logs", action="store_true",
+                    help="Не индексировать логи AI Studio")
+    pi.add_argument("--optimize", action="store_true",
+                    help="Сжать индекс после индексации (VACUUM)")
 
     # --- search ---
     ps = sub.add_parser("search", help="Поиск по индексу")
     ps.add_argument("query", help="Поисковый запрос")
     ps.add_argument("--db", default=None, help="Путь к файлу индекса (.db)")
     ps.add_argument("--in", dest="scope", default="all",
-                    choices=["all", "prompts", "answers", "thoughts"],
-                    help="Где искать")
+                    choices=["all", "prompts", "answers", "thoughts", "txt"],
+                    help="Где искать (txt — только текстовые файлы)")
     ps.add_argument("--model", default=None, help="Фильтр по имени модели")
     ps.add_argument("--path", default=None, help="Фильтр по подстроке пути")
     ps.add_argument("--limit", type=int, default=30)
@@ -63,7 +69,8 @@ def _add_export_args(p):
                    help="Файл(ы) лога или папка(и) с логами")
     p.add_argument("-o", "--out", default=None,
                    help="Папка для экспорта (если не указана — только инфо)")
-    p.add_argument("-f", "--format", choices=["txt", "html", "md"],
+    p.add_argument("-f", "--format",
+                   choices=["txt", "html", "md", "json", "jsonl"],
                    default="txt", help="Формат экспорта (по умолчанию txt)")
     p.add_argument("--content", choices=["all", "prompts", "answers", "thoughts"],
                    default="all", help="Что экспортировать (по умолчанию всё)")
@@ -172,37 +179,51 @@ def cmd_index(args) -> int:
 
         stats = idx.index_paths(args.paths,
                                 recursive=not args.no_recursive,
+                                include_logs=not args.no_logs,
+                                include_txt=not args.no_txt,
                                 progress=cb)
         print(f"\nИндексация: {stats.summary()}")
         for e in stats.errors[:10]:
             print(f"  ⚠ {e}")
+        if args.optimize:
+            idx.optimize()
+            print("Индекс сжат (optimize + vacuum).")
         st = idx.stats()
-        print(f"Итого в индексе: {st['files']} файлов, "
-              f"{st['messages']} сообщений, БД {st['db_size']/1e6:.1f} МБ "
+        print(f"Итого в индексе: {st['files']} файлов "
+              f"(логов {st['logs']}, текстов {st['texts']}), "
+              f"{st['messages']} записей, БД {st['db_size']/1e6:.1f} МБ "
               f"({st['db_path']})")
     return 0
 
 
 def cmd_search(args) -> int:
     from indexer import SearchIndex
-    role, thoughts = None, None
+    role, thoughts, kind = None, None, None
     if args.scope == "prompts":
         role, thoughts = "user", False
     elif args.scope == "answers":
         role, thoughts = "model", False
     elif args.scope == "thoughts":
         thoughts = True
+    elif args.scope == "txt":
+        kind = "txt"
 
     with SearchIndex(args.db) as idx:
         hits = idx.search(args.query, role=role, thoughts=thoughts,
                           model=args.model, path_like=args.path,
-                          limit=args.limit)
+                          kind=kind, limit=args.limit)
         if not hits:
             print("Ничего не найдено.")
             return 1
         for h in hits:
-            kind = "💭" if h.is_thought else ("👤" if h.role == "user" else "🤖")
-            print(f"{kind} {h.title} · {h.model or '—'} · сообщение #{h.msg_num}")
+            if h.kind == "txt":
+                icon = "📄"
+                what = f"блок #{h.msg_num}"
+            else:
+                icon = ("💭" if h.is_thought
+                        else ("👤" if h.role == "user" else "🤖"))
+                what = f"сообщение #{h.msg_num}"
+            print(f"{icon} {h.title} · {h.model or '—'} · {what}")
             print(f"   {h.snippet}")
             print(f"   {h.path}\n")
         print(f"Найдено: {len(hits)}")
@@ -213,7 +234,8 @@ def cmd_stats(args) -> int:
     from indexer import SearchIndex
     with SearchIndex(args.db) as idx:
         st = idx.stats()
-        print(f"Файлов: {st['files']}\nСообщений: {st['messages']}\n"
+        print(f"Файлов: {st['files']} (логов {st['logs']}, "
+              f"текстов {st['texts']})\nЗаписей: {st['messages']}\n"
               f"БД: {st['db_path']} ({st['db_size']/1e6:.1f} МБ)")
     return 0
 
