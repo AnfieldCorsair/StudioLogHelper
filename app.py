@@ -12,6 +12,7 @@ import json
 import sys
 import re
 import html as _html
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSettings, QTimer
@@ -575,7 +576,10 @@ class MainWindow(QMainWindow):
         self.chats: list = []
         self.current: core.ChatLog | None = None
         self.chat_categories: dict = self._load_chat_categories()
+        self.chat_notes: dict = self._load_chat_notes()
         self.categories: set = set(v for v in self.chat_categories.values() if v)
+        self.project_name = self.settings.value("org/project_name", "")
+        self.project_path = self.settings.value("org/project_path", "")
         self._index = None       # ленивый SearchIndex
         self._zoom_timer = QTimer(self)
         self._zoom_timer.setSingleShot(True)
@@ -610,8 +614,22 @@ class MainWindow(QMainWindow):
         self.settings.setValue("org/chat_categories",
                                json.dumps(self.chat_categories, ensure_ascii=False))
 
+    def _load_chat_notes(self) -> dict:
+        try:
+            data = json.loads(self.settings.value("org/chat_notes", "{}"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_chat_notes(self):
+        self.settings.setValue("org/chat_notes",
+                               json.dumps(self.chat_notes, ensure_ascii=False))
+
     def _chat_category(self, chat) -> str:
         return self.chat_categories.get(chat.path, "")
+
+    def _chat_note(self, chat) -> str:
+        return self.chat_notes.get(chat.path, "")
 
     def _decorate_button(self, btn, icon_name: str, min_width: int = 0):
         original = btn.text()
@@ -629,6 +647,132 @@ class MainWindow(QMainWindow):
             btn.setMinimumWidth(min_width)
         btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
 
+
+
+    def new_project(self):
+        name, ok = QInputDialog.getText(self, APP_NAME, tr("project_name"),
+                                        text=self.project_name or "StudioLogHelper project")
+        name = name.strip()
+        if not ok or not name:
+            return
+        self.project_name = name
+        self.project_path = ""
+        self.categories.clear()
+        self.chat_categories.clear()
+        self.chat_notes.clear()
+        self.settings.setValue("org/project_name", name)
+        self.settings.setValue("org/project_path", "")
+        self._save_chat_categories()
+        self._save_chat_notes()
+        self._refresh_file_list()
+        self.statusBar().showMessage(tr("project_created", name=name), 5000)
+
+    def _project_doc(self) -> dict:
+        files = []
+        known = {c.path: c for c in self.chats}
+        for path in sorted(set(known) | set(self.chat_categories) | set(self.chat_notes)):
+            chat = known.get(path)
+            item = {
+                "path": path,
+                "category": self.chat_categories.get(path, ""),
+                "note": self.chat_notes.get(path, ""),
+            }
+            if chat:
+                item.update({
+                    "title": chat.title,
+                    "source_format": chat.source_format,
+                    "model": chat.model,
+                    "messages": len(chat.messages),
+                    "prompts": chat.user_count,
+                    "answers": chat.model_count,
+                })
+            files.append(item)
+        return {
+            "app": APP_NAME,
+            "schema": "studiologhelper.project.v1",
+            "created_or_saved_at": datetime.now().isoformat(timespec="seconds"),
+            "project": {"name": self.project_name or "", "path": self.project_path or ""},
+            "categories": sorted(self.categories),
+            "files": files,
+            "parser": {
+                "numbered_mode": self.text_parse_options.numbered_mode,
+                "user_headers": self.text_parse_options.user_headers,
+                "model_headers": self.text_parse_options.model_headers,
+            },
+            "ui": {"show_extensions": self.show_extensions, "theme": self.theme_name},
+        }
+
+    def save_project(self):
+        last = self.project_path or self.settings.value("ui/last_dir", str(Path.home()))
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("project_save"), last, "StudioLogHelper Project (*.slh.json);;JSON (*.json)")
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".slh.json"
+        self.project_path = path
+        doc = self._project_doc()
+        Path(path).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.settings.setValue("org/project_path", path)
+        if self.project_name:
+            self.settings.setValue("org/project_name", self.project_name)
+        self.statusBar().showMessage(tr("project_saved", path=path), 6000)
+
+    def open_project(self):
+        last = self.project_path or self.settings.value("ui/last_dir", str(Path.home()))
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("project_open"), last, "StudioLogHelper Project (*.slh.json *.json);;All files (*)")
+        if not path:
+            return
+        try:
+            doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as ex:
+            QMessageBox.warning(self, APP_NAME, str(ex))
+            return
+        self.project_path = path
+        self.project_name = (doc.get("project") or {}).get("name", "")
+        self.categories = set(x for x in doc.get("categories", []) if isinstance(x, str))
+        self.chat_categories.clear()
+        self.chat_notes.clear()
+        load_paths = []
+        for item in doc.get("files", []):
+            if not isinstance(item, dict):
+                continue
+            f = item.get("path", "")
+            if not f:
+                continue
+            cat = item.get("category", "")
+            note = item.get("note", "")
+            if cat:
+                self.chat_categories[f] = cat
+                self.categories.add(cat)
+            if note:
+                self.chat_notes[f] = note
+            if Path(f).exists():
+                load_paths.append(f)
+        self._save_chat_categories()
+        self._save_chat_notes()
+        self.settings.setValue("org/project_path", path)
+        self.settings.setValue("org/project_name", self.project_name)
+        self.load_paths(load_paths)
+        self._refresh_file_list()
+        self.statusBar().showMessage(tr("project_loaded", path=path), 6000)
+
+    def set_note_current(self):
+        if not self._need_chat():
+            return
+        note, ok = QInputDialog.getMultiLineText(
+            self, APP_NAME, tr("project_note"), self._chat_note(self.current))
+        if not ok:
+            return
+        note = note.strip()
+        if note:
+            self.chat_notes[self.current.path] = note
+        else:
+            self.chat_notes.pop(self.current.path, None)
+        self._save_chat_notes()
+        self._rebuild_view()
+        self.statusBar().showMessage(tr("note_saved"), 4000)
 
     def create_category(self):
         name, ok = QInputDialog.getText(self, APP_NAME, tr("category_name"))
@@ -716,7 +860,7 @@ class MainWindow(QMainWindow):
         self._decorate_button(self.btn_export, "export.png", 125)
         self.btn_export_all = QPushButton(tr("export_all"))
         self.btn_export_all.clicked.connect(self.export_all)
-        self._decorate_button(self.btn_export_all, "export.png", 135)
+        self._decorate_button(self.btn_export_all, "export.png", 190)
         top.addWidget(self.btn_export)
         top.addWidget(self.btn_export_all)
 
@@ -727,13 +871,20 @@ class MainWindow(QMainWindow):
 
         self.btn_org = QToolButton()
         self.btn_org.setText(tr("organize_button"))
+        self.btn_org.setToolTip(tr("organize_tip"))
         self.btn_org.setPopupMode(QToolButton.InstantPopup)
         om = QMenu(self.btn_org)
-        om.addAction(tr("new_text_log"), self.create_text_log)
+        om.addAction(tr("project_new"), self.new_project)
+        om.addAction(tr("project_open"), self.open_project)
+        om.addAction(tr("project_save"), self.save_project)
+        om.addSeparator()
         om.addAction(tr("new_category"), self.create_category)
         om.addAction(tr("assign_category"), self.assign_category_current)
+        om.addAction(tr("project_note_current"), self.set_note_current)
+        om.addSeparator()
+        om.addAction(tr("new_text_log"), self.create_text_log)
         self.btn_org.setMenu(om)
-        self._decorate_button(self.btn_org, "export.png", 155)
+        self._decorate_button(self.btn_org, "export.png", 210)
         top.addWidget(self.btn_org)
 
         top.addStretch(1)
@@ -895,19 +1046,30 @@ class MainWindow(QMainWindow):
         self.ed_query.setPlaceholderText(tr("search_placeholder"))
         self.ed_query.returnPressed.connect(self.do_search)
         row1.addWidget(self.ed_query, 1)
-        self.cmb_scope = QComboBox()
-        self.cmb_scope.addItem(tr("search_scope_all"), "all")
-        self.cmb_scope.addItem(tr("search_scope_user"), "user")
-        self.cmb_scope.addItem(tr("search_scope_model"), "model")
-        self.cmb_scope.addItem(tr("search_scope_thoughts"), "thoughts")
-        self.cmb_scope.addItem(tr("search_scope_txt"), "txt")
-        row1.addWidget(self.cmb_scope)
         b_search = QPushButton(tr("search_btn"))
         b_search.setObjectName("accent")
         b_search.clicked.connect(self.do_search)
         self._decorate_button(b_search, "search.png", 90)
         row1.addWidget(b_search)
         v.addLayout(row1)
+
+        row_scope = QHBoxLayout()
+        row_scope.addWidget(QLabel(tr("search_where")))
+        self.cmb_search_where = QComboBox()
+        self.cmb_search_where.addItem(tr("search_in_current"), "current")
+        self.cmb_search_where.addItem(tr("search_in_loaded"), "loaded")
+        self.cmb_search_where.addItem(tr("search_in_index_all"), "index_all")
+        self.cmb_search_where.addItem(tr("search_in_index_txt"), "index_txt")
+        self.cmb_search_where.addItem(tr("search_in_index_json"), "index_json")
+        row_scope.addWidget(self.cmb_search_where, 1)
+        row_scope.addWidget(QLabel(tr("search_what")))
+        self.cmb_scope = QComboBox()
+        self.cmb_scope.addItem(tr("search_scope_all"), "all")
+        self.cmb_scope.addItem(tr("search_scope_user"), "user")
+        self.cmb_scope.addItem(tr("search_scope_model"), "model")
+        self.cmb_scope.addItem(tr("search_scope_thoughts"), "thoughts")
+        row_scope.addWidget(self.cmb_scope)
+        v.addLayout(row_scope)
 
         row2 = QHBoxLayout()
         b_index = QPushButton(tr("index_folder_btn"))
@@ -941,10 +1103,32 @@ class MainWindow(QMainWindow):
         f.setPointSizeF(BASE_FONT_PT * scale)
         QApplication.instance().setFont(f)
         self.btn_theme.setText("🌙" if self.theme_name == "dark" else "☀️")
+        self._apply_window_frame_theme()
         self._responsive_topbar()
         if rebuild_view:
             self._rebuild_view()
         self._update_index_stats()
+
+
+    def _apply_window_frame_theme(self):
+        """Пытаемся синхронизировать системную рамку/заголовок с темой.
+
+        На Windows 10/11 работает через DWM dark titlebar. На Linux/macOS
+        это контролирует оконный менеджер/система, поэтому просто пропускаем.
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            value = ctypes.c_int(1 if self.theme_name == "dark" else 0)
+            dwm = ctypes.windll.dwmapi
+            # 20 — DWMWA_USE_IMMERSIVE_DARK_MODE на новых Windows,
+            # 19 — старый номер атрибута.
+            for attr in (20, 19):
+                dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+        except Exception:
+            pass
 
     def toggle_theme(self):
         self.theme_name = "light" if self.theme_name == "dark" else "dark"
@@ -1169,6 +1353,13 @@ class MainWindow(QMainWindow):
         t = THEMES[self.theme_name]
 
         info = [f"<b>{_html.escape(chat.title)}</b>"]
+        cat = self._chat_category(chat)
+        note = self._chat_note(chat)
+        if cat:
+            info.append(f"{tr('category_label')}: {_html.escape(cat)}")
+        if note:
+            short_note = note.replace("\n", " ")[:160]
+            info.append(f"{tr('note_label')}: {_html.escape(short_note)}")
         if chat.model:
             info.append(f"{tr('info_model')}: {_html.escape(chat.model)}")
         info.append(tr("info_msgs", n=len(chat.messages),
@@ -1377,12 +1568,73 @@ class MainWindow(QMainWindow):
             prog.close()
         self._update_index_stats()
 
+    def _plain_snippet(self, text: str, q: str, limit: int = 220) -> str:
+        one = re.sub(r"\s+", " ", text).strip()
+        if not one:
+            return ""
+        pos = one.lower().find(q.lower())
+        if pos < 0:
+            return one[:limit] + ("…" if len(one) > limit else "")
+        a = max(0, pos - 70)
+        b = min(len(one), pos + len(q) + 140)
+        return ("…" if a else "") + one[a:b] + ("…" if b < len(one) else "")
+
+    def _local_search_hits(self, q: str, chats: list, scope: str) -> list:
+        hits = []
+        ql = q.lower()
+        for chat in chats:
+            for num, msg in enumerate(chat.messages, 1):
+                parts = []
+                if scope in ("all", "user") and msg.is_user and msg.text:
+                    parts.append((msg.text, "👤", "user"))
+                if scope in ("all", "model") and not msg.is_user and msg.text:
+                    parts.append((msg.text, "🤖", "model"))
+                if scope in ("all", "thoughts") and msg.has_thoughts:
+                    parts.extend((t, "💭", "thoughts") for t in msg.thoughts)
+                for text, icon, role in parts:
+                    if ql in text.lower():
+                        hits.append((chat, num, icon, role, self._plain_snippet(text, q)))
+                        break
+        return hits
+
     def do_search(self):
         q = self.ed_query.text().strip()
         self.search_results.clear()
         if not q:
             return
+        where = self.cmb_search_where.currentData()
         scope = self.cmb_scope.currentData()
+
+        # Быстрый поиск без индекса — по уже открытым данным.
+        if where in ("current", "loaded"):
+            if where == "current":
+                if not self._need_chat():
+                    return
+                chats = [self.current]
+            else:
+                chats = list(self.chats)
+            hits = self._local_search_hits(q, chats, scope)
+            if not hits:
+                it = QListWidgetItem(tr("search_no_results"))
+                it.setFlags(Qt.NoItemFlags)
+                self.search_results.addItem(it)
+                return
+            for chat, num, icon, role, snip in hits[:300]:
+                it = QListWidgetItem(
+                    f"{icon} {chat.title}  ·  {self._format_source_badge(chat)}  ·  #{num}\n{snip}")
+                it.setToolTip(chat.path)
+                it.setData(Qt.UserRole, (chat.path, "log"))
+                self.search_results.addItem(it)
+            self.statusBar().showMessage(tr("search_results_n", n=len(hits)), 5000)
+            return
+
+        # Поиск по папке — через индекс.
+        if self._index is None:
+            it = QListWidgetItem(tr("search_need_index"))
+            it.setFlags(Qt.NoItemFlags)
+            self.search_results.addItem(it)
+            return
+
         role, thoughts, kind = None, None, None
         if scope == "user":
             role, thoughts = "user", False
@@ -1390,11 +1642,13 @@ class MainWindow(QMainWindow):
             role, thoughts = "model", False
         elif scope == "thoughts":
             thoughts = True
-        elif scope == "txt":
+        if where == "index_txt":
             kind = "txt"
+        elif where == "index_json":
+            kind = "log"
         try:
-            hits = self._get_index().search(q, role=role, thoughts=thoughts,
-                                            kind=kind, limit=200)
+            hits = self._index.search(q, role=role, thoughts=thoughts,
+                                      kind=kind, limit=300)
         except Exception as ex:
             QMessageBox.warning(self, APP_NAME, str(ex))
             return
@@ -1437,11 +1691,9 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    try:
-        QApplication.setAttribute(Qt.AA_DontUseNativeDialogs, True)
-    except AttributeError:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
     app = QApplication(sys.argv)
+    # Fusion оставляем для стабильного вида самого приложения, но проводник
+    # файлов/папок теперь снова нативный: так привычнее обычным пользователям.
     app.setStyle("Fusion")
     ic = load_icon("app_logo.png")
     if not ic.isNull():
