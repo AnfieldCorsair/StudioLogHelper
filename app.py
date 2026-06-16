@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QTabWidget, QPlainTextEdit, QScrollArea,
     QFrame, QDialog, QDialogButtonBox, QCheckBox, QComboBox, QGroupBox,
     QFormLayout, QLineEdit, QStatusBar, QSizePolicy, QProgressDialog,
-    QTextEdit, QInputDialog, QAbstractItemView,
+    QTextEdit, QInputDialog, QAbstractItemView, QSpinBox,
 )
 
 import core
@@ -572,10 +572,13 @@ class ExportDialog(QDialog):
 class MessageCard(QFrame):
     def __init__(self, msg: core.Message, num: int, theme: dict,
                  render_md: bool, show_thoughts: bool, status_cb,
-                 model_name: str = ""):
+                 model_name: str = "", collapse_long: bool = True,
+                 preview_chars: int = LONG_MESSAGE_PREVIEW_CHARS):
         super().__init__()
         self.msg = msg
         self._status = status_cb
+        self._preview_chars = max(200, int(preview_chars or LONG_MESSAGE_PREVIEW_CHARS))
+        self._auto_collapse = collapse_long
         self.setObjectName("msgCardUser" if msg.is_user else "msgCard")
         # без этого фон QFrame-наследника может не краситься из QSS
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -668,7 +671,7 @@ class MessageCard(QFrame):
         self._rich = render_md and not msg.is_user
         self._collapsed = False
         if text:
-            if len(text) > LONG_MESSAGE_PREVIEW_CHARS:
+            if self._auto_collapse and len(text) > self._preview_chars:
                 self._collapsed = True
                 body = self._make_body(self._preview_text(text), False)
                 self._body = body
@@ -698,13 +701,21 @@ class MessageCard(QFrame):
             self._body.setText(text)
 
     def _toggle_collapsed(self):
-        self._collapsed = not self._collapsed
+        self.set_collapsed(not self._collapsed)
+
+    def set_collapsed(self, collapsed: bool):
+        if self._toggle_btn is None or not self._full_text:
+            return
+        self._collapsed = collapsed
         if self._collapsed:
             self._set_body_text(self._preview_text(self._full_text), False)
             self._toggle_btn.setText(tr("expand_message"))
         else:
             self._set_body_text(self._full_text, self._rich)
             self._toggle_btn.setText(tr("collapse_message"))
+
+    def is_long_card(self) -> bool:
+        return self._toggle_btn is not None
 
     def _make_body(self, text: str, rich: bool) -> QLabel:
         body = QLabel()
@@ -743,6 +754,40 @@ class MessageCard(QFrame):
 # Главное окно
 # ----------------------------------------------------------------------------
 
+
+class CollapseSettingsDialog(QDialog):
+    def __init__(self, parent, settings: QSettings):
+        super().__init__(parent)
+        self.setWindowTitle(tr("collapse_settings_title"))
+        self.setMinimumWidth(420)
+        self._s = settings
+        lay = QVBoxLayout(self)
+        self.chk_auto = QCheckBox(tr("auto_collapse_long"))
+        self.chk_auto.setChecked(self._s.value("ui/auto_collapse_long", "true") == "true")
+        lay.addWidget(self.chk_auto)
+        form = QFormLayout()
+        self.spin_chars = QSpinBox()
+        self.spin_chars.setRange(800, 50000)
+        self.spin_chars.setSingleStep(500)
+        try:
+            val = int(self._s.value("ui/collapse_preview_chars", LONG_MESSAGE_PREVIEW_CHARS))
+        except (TypeError, ValueError):
+            val = LONG_MESSAGE_PREVIEW_CHARS
+        self.spin_chars.setValue(max(800, min(50000, val)))
+        form.addRow(tr("collapse_preview_chars"), self.spin_chars)
+        lay.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(tr("sep_save"))
+        bb.button(QDialogButtonBox.Cancel).setText(tr("cancel"))
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def save(self):
+        self._s.setValue("ui/auto_collapse_long", "true" if self.chk_auto.isChecked() else "false")
+        self._s.setValue("ui/collapse_preview_chars", self.spin_chars.value())
+        return self.chk_auto.isChecked(), self.spin_chars.value()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -761,6 +806,12 @@ class MainWindow(QMainWindow):
         self.show_thoughts = self.settings.value("ui/show_thoughts", "true") == "true"
         self.show_extensions = self.settings.value("ui/show_extensions", "false") == "true"
         self.show_diagnostics = self.settings.value("ui/show_diagnostics", "false") == "true"
+        self.auto_collapse_long = self.settings.value("ui/auto_collapse_long", "true") == "true"
+        try:
+            self.collapse_preview_chars = int(self.settings.value("ui/collapse_preview_chars", LONG_MESSAGE_PREVIEW_CHARS))
+        except (TypeError, ValueError):
+            self.collapse_preview_chars = LONG_MESSAGE_PREVIEW_CHARS
+        self.collapse_preview_chars = max(800, min(50000, self.collapse_preview_chars))
         try:
             self.zoom = int(self.settings.value("ui/zoom", 100))
         except (TypeError, ValueError):
@@ -786,6 +837,9 @@ class MainWindow(QMainWindow):
         self._pending_rebuild = False
         self._render_generation = 0
         self._render_next = 0
+        self._rebuild_timer = QTimer(self)
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.timeout.connect(self._rebuild_view)
         self._autosave_timer = QTimer(self)
         self._autosave_timer.timeout.connect(self._autosave_project)
         self._autosave_timer.start(30000)
@@ -1338,6 +1392,18 @@ class MainWindow(QMainWindow):
         top_opts.addWidget(self.chk_view_md)
         top_opts.addWidget(self.chk_view_th)
 
+        self.btn_collapse_long = QToolButton()
+        self.btn_collapse_long.setText(tr("collapse_all_long"))
+        self.btn_collapse_long.setPopupMode(QToolButton.MenuButtonPopup)
+        self.btn_collapse_long.clicked.connect(lambda: self.set_all_long_collapsed(True))
+        cm = QMenu(self.btn_collapse_long)
+        cm.addAction(tr("collapse_all_long"), lambda: self.set_all_long_collapsed(True))
+        cm.addAction(tr("expand_all_long"), lambda: self.set_all_long_collapsed(False))
+        cm.addSeparator()
+        cm.addAction(tr("collapse_settings"), self.open_collapse_settings)
+        self.btn_collapse_long.setMenu(cm)
+        top_opts.addWidget(self.btn_collapse_long)
+
         b_zout = QPushButton("A−")
         b_zout.setFixedWidth(40)
         b_zout.setToolTip(tr("zoom_out_tip"))
@@ -1649,15 +1715,43 @@ class MainWindow(QMainWindow):
         self.apply_theme()
         self.statusBar().showMessage(tr("status_hint"))
 
+
+    def open_collapse_settings(self):
+        dlg = CollapseSettingsDialog(self, self.settings)
+        if dlg.exec() == QDialog.Accepted:
+            self.auto_collapse_long, self.collapse_preview_chars = dlg.save()
+            self.statusBar().showMessage(tr("collapse_saved"), 4000)
+            self._schedule_rebuild_view()
+
+    def _iter_message_cards(self):
+        for i in range(self.scroll_lay.count()):
+            w = self.scroll_lay.itemAt(i).widget()
+            if isinstance(w, MessageCard):
+                yield w
+
+    def set_all_long_collapsed(self, collapsed: bool):
+        self.auto_collapse_long = collapsed
+        self.settings.setValue("ui/auto_collapse_long", "true" if collapsed else "false")
+        for card in self._iter_message_cards():
+            if card.is_long_card():
+                card.set_collapsed(collapsed)
+        self.statusBar().showMessage(tr("collapse_all_long" if collapsed else "expand_all_long"), 2500)
+
+    def _schedule_rebuild_view(self, delay: int = 80):
+        if hasattr(self, "_rebuild_timer"):
+            self._rebuild_timer.start(delay)
+        else:
+            self._rebuild_view()
+
     def _toggle_md(self, on):
         self.render_md = on
         self.settings.setValue("ui/render_md", "true" if on else "false")
-        self._rebuild_view()
+        self._schedule_rebuild_view()
 
     def _toggle_thoughts(self, on):
         self.show_thoughts = on
         self.settings.setValue("ui/show_thoughts", "true" if on else "false")
-        self._rebuild_view()
+        self._schedule_rebuild_view()
 
     # ---------- drag & drop ----------
 
@@ -1846,16 +1940,30 @@ class MainWindow(QMainWindow):
         self._rebuild_view()
 
     def _clear_cards(self):
+        self._render_generation += 1  # отменяет отложенные батчи старого файла
+        if hasattr(self, "scroll_host"):
+            self.scroll_host.setUpdatesEnabled(False)
         while self.scroll_lay.count() > 1:
             it = self.scroll_lay.takeAt(0)
             w = it.widget()
             if w:
+                w.setParent(None)
                 w.deleteLater()
+        if hasattr(self, "scroll_host"):
+            self.scroll_host.setUpdatesEnabled(True)
 
     def _rebuild_view(self):
+        if hasattr(self, "scroll"):
+            self.scroll.setUpdatesEnabled(False)
+        if hasattr(self, "raw_view"):
+            self.raw_view.setUpdatesEnabled(False)
         self._clear_cards()
         chat = self.current
         if chat is None:
+            if hasattr(self, "scroll"):
+                self.scroll.setUpdatesEnabled(True)
+            if hasattr(self, "raw_view"):
+                self.raw_view.setUpdatesEnabled(True)
             return
         t = THEMES[self.theme_name]
 
@@ -1923,6 +2031,8 @@ class MainWindow(QMainWindow):
                 raw = raw[:RAW_PREVIEW_LIMIT] + tr("raw_preview_truncated", shown=RAW_PREVIEW_LIMIT, total=len(raw))
             self.raw_view.setPlainText(raw)
 
+        self.raw_view.setUpdatesEnabled(True)
+        self.scroll.setUpdatesEnabled(True)
         QTimer.singleShot(0, lambda:
                           self.scroll.verticalScrollBar().setValue(0))
 
@@ -1941,12 +2051,16 @@ class MainWindow(QMainWindow):
         status = lambda s: self.statusBar().showMessage(s, 4000)
         start = self._render_next
         end = min(start + VIEW_BATCH, len(chat.messages))
+        self.scroll_host.setUpdatesEnabled(False)
         for idx in range(start, end):
             msg = chat.messages[idx]
             card = MessageCard(msg, idx + 1, t, self.render_md,
                                self.show_thoughts, status,
-                               model_name=chat.model)
+                               model_name=chat.model,
+                               collapse_long=self.auto_collapse_long,
+                               preview_chars=self.collapse_preview_chars)
             self.scroll_lay.insertWidget(self.scroll_lay.count() - 1, card)
+        self.scroll_host.setUpdatesEnabled(True)
         self._render_next = end
 
     def _maybe_load_more_messages(self):

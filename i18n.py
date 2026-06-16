@@ -201,6 +201,14 @@ _RU = {
     "collapse_message": "Свернуть ответ",
     "collapsed_tail": "ответ свёрнут, скрыто символов: {n}",
 
+    "collapse_all_long": "Свернуть длинные",
+    "expand_all_long": "Развернуть длинные",
+    "collapse_settings": "Настройка сворачивания…",
+    "collapse_settings_title": "Настройка сворачивания длинных сообщений",
+    "auto_collapse_long": "Автоматически сворачивать длинные ответы и запросы",
+    "collapse_preview_chars": "Сколько символов показывать:",
+    "collapse_saved": "Настройки сворачивания сохранены.",
+
     # --- статусы / сообщения ---
     "msg_copied": "Сообщение скопировано.",
     "thoughts_copied": "Размышления скопированы.",
@@ -471,6 +479,14 @@ _EN = {
     "expand_message": "Expand long answer",
     "collapse_message": "Collapse answer",
     "collapsed_tail": "message collapsed, hidden characters: {n}",
+
+    "collapse_all_long": "Collapse long",
+    "expand_all_long": "Expand long",
+    "collapse_settings": "Collapse settings…",
+    "collapse_settings_title": "Long message collapse settings",
+    "auto_collapse_long": "Automatically collapse long answers and prompts",
+    "collapse_preview_chars": "Preview characters:",
+    "collapse_saved": "Collapse settings saved.",
 
     # --- statuses / messages ---
     "msg_copied": "Message copied.",
