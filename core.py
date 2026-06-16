@@ -98,6 +98,8 @@ class ChatLog:
     path: str = ""
     title: str = ""
     model: str = ""
+    source_format: str = ""                           # json | text
+    raw_text: str = ""                                # исходник для text-логов
     run_settings: dict = field(default_factory=dict)
     system_instruction: str = ""
     messages: list = field(default_factory=list)       # список Message
@@ -158,7 +160,7 @@ def parse_data(data: dict, path: str = "") -> ChatLog:
     if not isinstance(data, dict):
         raise ParseError(tr("core_err_root"))
 
-    chat = ChatLog(path=path, raw=data)
+    chat = ChatLog(path=path, raw=data, source_format="json")
     chat.title = Path(path).stem if path else tr("core_untitled")
 
     rs = data.get("runSettings")
@@ -292,7 +294,7 @@ class TextParseOptions:
     """
     user_headers: list = field(default_factory=list)
     model_headers: list = field(default_factory=list)
-    numbered_mode: str = "alternating"
+    numbered_mode: str = "model"
 
 
 def _norm_header(s: str) -> str:
@@ -338,7 +340,7 @@ def _role_from_header(header: str, opts: TextParseOptions) -> Optional[str]:
 
 
 def _role_for_number(num: int, opts: TextParseOptions) -> str:
-    mode = (opts.numbered_mode or "alternating").lower()
+    mode = (opts.numbered_mode or "model").lower()
     if mode == "model":
         return "model"
     if mode == "user":
@@ -361,7 +363,8 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
       #1: ... #2: ... (роль берётся из numbered_mode; по умолчанию чередование)
     """
     opts = options or TextParseOptions()
-    chat = ChatLog(path=path, title=Path(path).stem if path else tr("core_untitled"))
+    chat = ChatLog(path=path, title=Path(path).stem if path else tr("core_untitled"),
+                   source_format="text", raw_text=text)
     if re.search(r"(?im)^\s*Arena\s+Side-by-Side\s+Chat\s*$", text):
         chat.model = "Arena AI"
 
@@ -448,7 +451,7 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
 
     _flush_text_msg(chat, role, buf)
 
-    if saw_numbered and (opts.numbered_mode or "alternating") == "alternating":
+    if saw_numbered and (opts.numbered_mode or "model") == "alternating":
         chat.warnings.append(tr("core_warn_numbered_guess"))
     if not chat.messages:
         raise ParseError(tr("core_err_text_no_messages"))

@@ -15,14 +15,14 @@ import html as _html
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSettings, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QIcon, QPixmap
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QIcon, QPixmap, QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QLabel, QPushButton, QToolButton, QMenu,
     QFileDialog, QMessageBox, QTabWidget, QPlainTextEdit, QScrollArea,
     QFrame, QDialog, QDialogButtonBox, QCheckBox, QComboBox, QGroupBox,
     QFormLayout, QLineEdit, QStatusBar, QSizePolicy, QProgressDialog,
-    QTextEdit,
+    QTextEdit, QInputDialog,
 )
 
 import core
@@ -35,6 +35,9 @@ ASSET_DIR = Path(__file__).resolve().parent / "assets" / "icons"
 
 ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 70, 200, 10
 BASE_FONT_PT = 10.0
+RESPONSIVE_ICON_ONLY_ZOOM = 150
+RESPONSIVE_ICON_ONLY_WIDTH = 980
+VIEW_BATCH = 60
 
 # ----------------------------------------------------------------------------
 # Темы
@@ -86,7 +89,7 @@ def build_stylesheet(t: dict, scale: float = 1.0) -> str:
     QPushButton#accent {{
         background: {t['accent']}; border: none; color: {t['accent_text']};
     }}
-    QPlainTextEdit {{
+    QPlainTextEdit, QTextEdit {{
         background: {t['code_bg']}; color: {t['text']};
         border: 1px solid {t['border']}; border-radius: 8px;
         font-family: Consolas, "Courier New", monospace;
@@ -142,10 +145,31 @@ def build_stylesheet(t: dict, scale: float = 1.0) -> str:
     QFrame#thoughtBox {{ background: {t['thought_bg']};
         border: 1px solid {t['border']}; border-radius: 8px; }}
     QFrame#thoughtBox QLabel {{ background: transparent; }}
+    QMessageBox, QFileDialog, QInputDialog {{ background: {t['bg']}; }}
+    QDialog QLabel, QMessageBox QLabel, QFileDialog QLabel {{ color: {t['text']}; background: transparent; }}
+    QDialogButtonBox QPushButton {{ min-width: 88px; }}
     QProgressDialog {{ background: {t['panel']}; }}
     """
 
 
+
+
+def build_palette(t: dict) -> QPalette:
+    """Единая палитра для Fusion/native диалогов, чтобы не всплывали белые фоны."""
+    pal = QPalette()
+    pal.setColor(QPalette.Window, QColor(t["bg"]))
+    pal.setColor(QPalette.WindowText, QColor(t["text"]))
+    pal.setColor(QPalette.Base, QColor(t["code_bg"]))
+    pal.setColor(QPalette.AlternateBase, QColor(t["panel"]))
+    pal.setColor(QPalette.ToolTipBase, QColor(t["panel"]))
+    pal.setColor(QPalette.ToolTipText, QColor(t["text"]))
+    pal.setColor(QPalette.Text, QColor(t["text"]))
+    pal.setColor(QPalette.Button, QColor(t["btn"]))
+    pal.setColor(QPalette.ButtonText, QColor(t["btn_text"]))
+    pal.setColor(QPalette.BrightText, QColor("#ff6b6b"))
+    pal.setColor(QPalette.Highlight, QColor(t["sel"]))
+    pal.setColor(QPalette.HighlightedText, QColor(t["text"]))
+    return pal
 
 
 # ----------------------------------------------------------------------------
@@ -234,7 +258,7 @@ class TextSeparatorsDialog(QDialog):
     def _load(self):
         self.ed_user.setPlainText(self._s.value("parse/user_headers", ""))
         self.ed_model.setPlainText(self._s.value("parse/model_headers", ""))
-        mode = self._s.value("parse/numbered_mode", "alternating")
+        mode = self._s.value("parse/numbered_mode", "model")
         i = self.cmb_num.findData(mode)
         self.cmb_num.setCurrentIndex(i if i >= 0 else 0)
 
@@ -539,6 +563,7 @@ class MainWindow(QMainWindow):
         self.theme_name = self.settings.value("ui/theme", "dark")
         self.render_md = self.settings.value("ui/render_md", "true") == "true"
         self.show_thoughts = self.settings.value("ui/show_thoughts", "true") == "true"
+        self.show_extensions = self.settings.value("ui/show_extensions", "false") == "true"
         try:
             self.zoom = int(self.settings.value("ui/zoom", 100))
         except (TypeError, ValueError):
@@ -549,7 +574,15 @@ class MainWindow(QMainWindow):
 
         self.chats: list = []
         self.current: core.ChatLog | None = None
+        self.chat_categories: dict = self._load_chat_categories()
+        self.categories: set = set(v for v in self.chat_categories.values() if v)
         self._index = None       # ленивый SearchIndex
+        self._zoom_timer = QTimer(self)
+        self._zoom_timer.setSingleShot(True)
+        self._zoom_timer.timeout.connect(self._apply_pending_zoom)
+        self._pending_rebuild = False
+        self._render_generation = 0
+        self._render_next = 0
 
         self._build_ui()
         self.apply_theme()
@@ -563,17 +596,83 @@ class MainWindow(QMainWindow):
         return core.TextParseOptions(
             user_headers=split_saved(self.settings.value("parse/user_headers", "")),
             model_headers=split_saved(self.settings.value("parse/model_headers", "")),
-            numbered_mode=self.settings.value("parse/numbered_mode", "alternating"),
+            numbered_mode=self.settings.value("parse/numbered_mode", "model"),
         )
 
+    def _load_chat_categories(self) -> dict:
+        try:
+            data = json.loads(self.settings.value("org/chat_categories", "{}"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_chat_categories(self):
+        self.settings.setValue("org/chat_categories",
+                               json.dumps(self.chat_categories, ensure_ascii=False))
+
+    def _chat_category(self, chat) -> str:
+        return self.chat_categories.get(chat.path, "")
+
     def _decorate_button(self, btn, icon_name: str, min_width: int = 0):
+        original = btn.text()
         ic = load_icon(icon_name)
+        compact = strip_leading_emoji(original) or original
         if not ic.isNull():
             btn.setIcon(ic)
-            btn.setText(strip_leading_emoji(btn.text()))
+            btn.setText(compact)
+        btn.setProperty("fullText", compact)
+        btn.setProperty("compactText", original[:2].strip() or compact[:1])
+        btn.setToolTip(btn.toolTip() or compact)
+        if hasattr(btn, "setToolButtonStyle"):
+            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         if min_width:
             btn.setMinimumWidth(min_width)
         btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+
+
+    def create_category(self):
+        name, ok = QInputDialog.getText(self, APP_NAME, tr("category_name"))
+        name = name.strip()
+        if not ok or not name:
+            return
+        self.categories.add(name)
+        self.statusBar().showMessage(tr("category_created", name=name), 4000)
+
+    def assign_category_current(self):
+        if not self._need_chat():
+            return
+        items = sorted(self.categories) or [tr("uncategorized")]
+        name, ok = QInputDialog.getItem(self, APP_NAME, tr("category_name"),
+                                        items, 0, True)
+        name = name.strip()
+        if not ok or not name:
+            return
+        self.categories.add(name)
+        self.chat_categories[self.current.path] = name
+        self._save_chat_categories()
+        self._refresh_file_list(select_path=self.current.path)
+        self.statusBar().showMessage(tr("category_assigned", name=name), 4000)
+
+    def create_text_log(self):
+        last = self.settings.value("ui/last_dir", str(Path.home()))
+        name, ok = QInputDialog.getText(self, APP_NAME, tr("file_name"),
+                                        text="new_chat.txt")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if not Path(name).suffix:
+            name += ".txt"
+        folder = QFileDialog.getExistingDirectory(self, tr("dlg_save_dir"), last)
+        if not folder:
+            return
+        p = Path(folder) / Path(name).name
+        if p.exists():
+            QMessageBox.warning(self, APP_NAME, f"File exists: {p}")
+            return
+        p.write_text("User:\n[новый запрос]\n\nModel:\n[новый ответ]\n", encoding="utf-8")
+        self.settings.setValue("ui/last_dir", folder)
+        self.statusBar().showMessage(tr("text_log_created", path=str(p)), 5000)
+        self.load_paths([str(p)], select_path=str(p))
 
     def open_text_separators(self):
         dlg = TextSeparatorsDialog(self, self.settings)
@@ -626,7 +725,25 @@ class MainWindow(QMainWindow):
         self._decorate_button(b_sep, "search.png", 190)
         top.addWidget(b_sep)
 
+        self.btn_org = QToolButton()
+        self.btn_org.setText(tr("organize_button"))
+        self.btn_org.setPopupMode(QToolButton.InstantPopup)
+        om = QMenu(self.btn_org)
+        om.addAction(tr("new_text_log"), self.create_text_log)
+        om.addAction(tr("new_category"), self.create_category)
+        om.addAction(tr("assign_category"), self.assign_category_current)
+        self.btn_org.setMenu(om)
+        self._decorate_button(self.btn_org, "export.png", 155)
+        top.addWidget(self.btn_org)
+
         top.addStretch(1)
+        root.addLayout(top)
+
+        # Вторая строка настроек: разгружает панель, чтобы кнопка разделителей
+        # не наезжала на Markdown/Размышления при крупном масштабе.
+        top_opts = QHBoxLayout()
+        top_opts.setSpacing(8)
+        top_opts.addStretch(1)
 
         self.chk_view_md = QCheckBox(tr("view_markdown"))
         self.chk_view_md.setChecked(self.render_md)
@@ -634,8 +751,8 @@ class MainWindow(QMainWindow):
         self.chk_view_th = QCheckBox(tr("view_thoughts"))
         self.chk_view_th.setChecked(self.show_thoughts)
         self.chk_view_th.toggled.connect(self._toggle_thoughts)
-        top.addWidget(self.chk_view_md)
-        top.addWidget(self.chk_view_th)
+        top_opts.addWidget(self.chk_view_md)
+        top_opts.addWidget(self.chk_view_th)
 
         b_zout = QPushButton("A−")
         b_zout.setFixedWidth(40)
@@ -645,8 +762,13 @@ class MainWindow(QMainWindow):
         b_zin.setFixedWidth(40)
         b_zin.setToolTip(tr("zoom_in_tip"))
         b_zin.clicked.connect(lambda: self.set_zoom(self.zoom + ZOOM_STEP))
-        top.addWidget(b_zout)
-        top.addWidget(b_zin)
+        self.lbl_zoom = QLabel(f"{self.zoom}%")
+        self.lbl_zoom.setObjectName("muted")
+        self.lbl_zoom.setMinimumWidth(48)
+        self.lbl_zoom.setAlignment(Qt.AlignCenter)
+        top_opts.addWidget(b_zout)
+        top_opts.addWidget(self.lbl_zoom)
+        top_opts.addWidget(b_zin)
 
         self.cmb_lang = QComboBox()
         for code, name in i18n.LANGS.items():
@@ -655,14 +777,16 @@ class MainWindow(QMainWindow):
             max(0, self.cmb_lang.findData(i18n.get_lang())))
         self.cmb_lang.setToolTip(tr("lang_tip"))
         self.cmb_lang.currentIndexChanged.connect(self._change_lang)
-        top.addWidget(self.cmb_lang)
+        top_opts.addWidget(self.cmb_lang)
 
         self.btn_theme = QPushButton("🌙" if self.theme_name == "dark" else "☀️")
         self.btn_theme.setFixedWidth(44)
         self.btn_theme.setToolTip(tr("theme_tip"))
         self.btn_theme.clicked.connect(self.toggle_theme)
-        top.addWidget(self.btn_theme)
-        root.addLayout(top)
+        top_opts.addWidget(self.btn_theme)
+        root.addLayout(top_opts)
+        self._top_buttons = [b_open, b_folder, self.btn_copy, self.btn_export,
+                             self.btn_export_all, b_sep, self.btn_org]
 
         # сплиттер: список файлов | контент
         split = QSplitter(Qt.Horizontal)
@@ -671,9 +795,16 @@ class MainWindow(QMainWindow):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(6)
+        cap_row = QHBoxLayout()
         cap = QLabel(tr("loaded_logs"))
         cap.setObjectName("muted")
-        ll.addWidget(cap)
+        cap_row.addWidget(cap, 1)
+        self.chk_show_ext = QCheckBox(tr("show_extensions"))
+        self.chk_show_ext.setToolTip(tr("show_extensions_tip"))
+        self.chk_show_ext.setChecked(self.show_extensions)
+        self.chk_show_ext.toggled.connect(self._toggle_extensions)
+        cap_row.addWidget(self.chk_show_ext)
+        ll.addLayout(cap_row)
         self.file_list = QListWidget()
         self.file_list.currentRowChanged.connect(self._select_chat)
         ll.addWidget(self.file_list)
@@ -712,9 +843,9 @@ class MainWindow(QMainWindow):
         rt = QVBoxLayout(raw_tab)
         rt.setContentsMargins(6, 6, 6, 6)
         raw_bar = QHBoxLayout()
-        b_copy_raw = QPushButton(tr("copy_json"))
-        b_copy_raw.clicked.connect(self.copy_raw)
-        raw_bar.addWidget(b_copy_raw)
+        self.b_copy_raw = QPushButton(tr("copy_source_json"))
+        self.b_copy_raw.clicked.connect(self.copy_raw)
+        raw_bar.addWidget(self.b_copy_raw)
         raw_bar.addStretch(1)
         rt.addLayout(raw_bar)
         self.raw_view = QPlainTextEdit()
@@ -804,11 +935,13 @@ class MainWindow(QMainWindow):
     def apply_theme(self, rebuild_view: bool = True):
         t = THEMES[self.theme_name]
         scale = self.zoom / 100.0
+        QApplication.instance().setPalette(build_palette(t))
         self.setStyleSheet(build_stylesheet(t, scale))
         f = QApplication.instance().font()
         f.setPointSizeF(BASE_FONT_PT * scale)
         QApplication.instance().setFont(f)
         self.btn_theme.setText("🌙" if self.theme_name == "dark" else "☀️")
+        self._responsive_topbar()
         if rebuild_view:
             self._rebuild_view()
         self._update_index_stats()
@@ -818,17 +951,43 @@ class MainWindow(QMainWindow):
         self.settings.setValue("ui/theme", self.theme_name)
         self.apply_theme(rebuild_view=True)
 
+    def _responsive_topbar(self):
+        if not hasattr(self, "_top_buttons"):
+            return
+        icon_only = (self.zoom >= RESPONSIVE_ICON_ONLY_ZOOM
+                     or self.width() < RESPONSIVE_ICON_ONLY_WIDTH)
+        for btn in self._top_buttons:
+            full = btn.property("fullText") or btn.text()
+            compact = btn.property("compactText") or full[:1]
+            has_icon = hasattr(btn, "icon") and not btn.icon().isNull()
+            btn.setText("" if icon_only and has_icon else (compact if icon_only else full))
+            btn.setToolTip(full)
+            if hasattr(btn, "setToolButtonStyle"):
+                btn.setToolButtonStyle(Qt.ToolButtonIconOnly if icon_only and has_icon
+                                       else Qt.ToolButtonTextBesideIcon)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._responsive_topbar()
+
     def set_zoom(self, z: int):
         z = max(ZOOM_MIN, min(ZOOM_MAX, z))
         if z == self.zoom:
             return
         self.zoom = z
         self.settings.setValue("ui/zoom", z)
+        if hasattr(self, "lbl_zoom"):
+            self.lbl_zoom.setText(f"{z}%")
+        # Debounce: при серии быстрых кликов применяем только последний масштаб.
+        self._zoom_timer.start(90)
+        self.statusBar().showMessage(f"Zoom: {z}%", 1200)
+        self._responsive_topbar()
+
+    def _apply_pending_zoom(self):
         # Важно: не пересоздаём карточки при каждом изменении масштаба.
         # Qt сам перерасчитает размеры по новому QSS/шрифту; это убирает лаги
         # на больших логах.
         self.apply_theme(rebuild_view=False)
-        self.statusBar().showMessage(f"Zoom: {z}%", 2000)
 
     def _change_lang(self):
         code = self.cmb_lang.currentData()
@@ -901,12 +1060,37 @@ class MainWindow(QMainWindow):
             return
         self.load_paths(files)
 
+    def _format_source_badge(self, chat: core.ChatLog) -> str:
+        p = Path(chat.path) if chat.path else Path("")
+        ext = p.suffix.lower().lstrip(".") or tr("no_extension")
+        kind = "JSON" if chat.source_format == "json" else "TXT"
+        return f"{kind} · {ext}"
+
     def _add_list_item(self, chat: core.ChatLog):
+        cat = self._chat_category(chat)
+        title = f"[{cat}] {chat.title}" if cat else chat.title
+        extra = f" · {self._format_source_badge(chat)}" if self.show_extensions else ""
         item = QListWidgetItem(
-            f"{chat.title}\n   {chat.model or '—'} · "
-            f"{len(chat.messages)} {tr('messages_short')}")
+            f"{title}\n   {chat.model or '—'} · "
+            f"{len(chat.messages)} {tr('messages_short')}{extra}")
         item.setToolTip(chat.path)
         self.file_list.addItem(item)
+
+    def _refresh_file_list(self, select_path: str = None):
+        cur_path = select_path or (self.current.path if self.current else None)
+        self.file_list.clear()
+        for chat in self.chats:
+            self._add_list_item(chat)
+        if cur_path:
+            for i, c in enumerate(self.chats):
+                if c.path == cur_path:
+                    self.file_list.setCurrentRow(i)
+                    break
+
+    def _toggle_extensions(self, on):
+        self.show_extensions = on
+        self.settings.setValue("ui/show_extensions", "true" if on else "false")
+        self._refresh_file_list()
 
     def load_paths(self, paths, select_path: str = None):
         if not paths:
@@ -1011,21 +1195,50 @@ class MainWindow(QMainWindow):
             bl.addWidget(lab)
             self.scroll_lay.insertWidget(self.scroll_lay.count() - 1, box)
 
-        status = lambda s: self.statusBar().showMessage(s, 4000)
-        for i, msg in enumerate(chat.messages, 1):
-            card = MessageCard(msg, i, t, self.render_md,
-                               self.show_thoughts, status,
-                               model_name=chat.model)
-            self.scroll_lay.insertWidget(self.scroll_lay.count() - 1, card)
+        self._render_generation += 1
+        self._render_next = 0
+        self._append_message_batch(self._render_generation)
 
-        try:
-            self.raw_view.setPlainText(
-                json.dumps(chat.raw, ensure_ascii=False, indent=2))
-        except (TypeError, ValueError):
-            self.raw_view.setPlainText("<JSON?>")
+        if chat.source_format == "json":
+            self.tabs.setTabText(1, tr("source_json"))
+            self.b_copy_raw.setText(tr("copy_source_json"))
+            try:
+                self.raw_view.setPlainText(
+                    json.dumps(chat.raw, ensure_ascii=False, indent=2))
+            except (TypeError, ValueError):
+                self.raw_view.setPlainText("<JSON?>")
+        else:
+            self.tabs.setTabText(1, tr("source_text"))
+            self.b_copy_raw.setText(tr("copy_source_text"))
+            self.raw_view.setPlainText(chat.raw_text or "")
 
         QTimer.singleShot(0, lambda:
                           self.scroll.verticalScrollBar().setValue(0))
+
+
+    def _append_message_batch(self, generation: int):
+        """Ленивая отрисовка карточек батчами.
+
+        Это не полноценная виртуализация, но длинные логи перестают блокировать
+        окно на секунды: первый экран появляется быстро, остальные карточки
+        дорисовываются небольшими порциями через event loop.
+        """
+        if generation != self._render_generation or self.current is None:
+            return
+        chat = self.current
+        t = THEMES[self.theme_name]
+        status = lambda s: self.statusBar().showMessage(s, 4000)
+        start = self._render_next
+        end = min(start + VIEW_BATCH, len(chat.messages))
+        for idx in range(start, end):
+            msg = chat.messages[idx]
+            card = MessageCard(msg, idx + 1, t, self.render_md,
+                               self.show_thoughts, status,
+                               model_name=chat.model)
+            self.scroll_lay.insertWidget(self.scroll_lay.count() - 1, card)
+        self._render_next = end
+        if end < len(chat.messages):
+            QTimer.singleShot(1, lambda g=generation: self._append_message_batch(g))
 
     # ---------- копирование ----------
 
@@ -1059,7 +1272,7 @@ class MainWindow(QMainWindow):
         if not self._need_chat():
             return
         QGuiApplication.clipboard().setText(self.raw_view.toPlainText())
-        self.statusBar().showMessage(tr("json_copied"), 4000)
+        self.statusBar().showMessage(tr("source_copied"), 4000)
 
     # ---------- экспорт ----------
 
@@ -1224,7 +1437,12 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    try:
+        QApplication.setAttribute(Qt.AA_DontUseNativeDialogs, True)
+    except AttributeError:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     ic = load_icon("app_logo.png")
     if not ic.isNull():
         app.setWindowIcon(ic)

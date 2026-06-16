@@ -1,0 +1,3 @@
+PySide6>=6.6
+# Optional: improves Markdown rendering in exports/preview. The app falls back to its built-in renderer if absent.
+markdown>=3.6
