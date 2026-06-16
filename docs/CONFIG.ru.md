@@ -30,12 +30,15 @@
       "prompts": 21,
       "answers": 21,
       "category": "Исходники Google Drive JSON",
+      "tags": ["произведение-x", "raw", "google-drive"],
       "note": "Файл без расширения, скачан напрямую из Google Drive"
     },
     {
       "path": "D:/logs/answers/01_answers.txt",
       "source_format": "text",
       "category": "Только ответы модели по произведению",
+      "tags": ["произведение-x", "answers"],
+      "derived_from": "D:/logs/raw/01",
       "note": "Экспорт только ответов модели"
     }
   ],

@@ -421,7 +421,14 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
             detected = _role_from_header(label, opts)
             # В очищенных экспортах подпись модели часто равна имени модели
             # (например, "#2 Arena AI"), поэтому роль восстанавливаем по номеру.
-            if not detected and m.group("num"):
+            # Но обычные Markdown-заголовки вроде "#### 1. Python" не должны
+            # становиться новым сообщением. Для Markdown-экспорта номер должен
+            # быть именно "#2" после решёток, а не "1." как в списке/заголовке.
+            stripped_line = line.lstrip()
+            numbered_export_header = stripped_line.startswith("---") or bool(
+                re.match(r"^#{1,6}\s+#\d+", stripped_line)
+            )
+            if not detected and m.group("num") and numbered_export_header:
                 detected = _role_for_number(int(m.group("num")), opts)
             if detected:
                 _flush_text_msg(chat, role, buf)

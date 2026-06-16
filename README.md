@@ -1,107 +1,25 @@
-# AI Studio Log Parser
+# StudioLogHelper
 
-Десктоп-приложение + CLI для парсинга логов чатов **Google AI Studio**
-(JSON-файлы с Google Drive, в том числе скачанные **без расширения**).
+Desktop + CLI helper for AI chat logs: Google AI Studio JSON, files without extension from Google Drive, Arena AI text exports, cleaned TXT/MD logs, batch export, search, projects, categories and tags.
 
-## Возможности
+## Documentation
 
-### Просмотр
-- 📄 Один файл, несколько файлов, **целая папка** (рекурсивно), drag & drop.
-  Расширение не важно — логи определяются по содержимому.
-- 👀 Вкладки: **«Чистый вид»** (карточки), **«Исходный JSON»**, **«🔎 Поиск»**.
-- 🏟 Дополнительно распознаются plain-text логи **Arena AI** (`User:`, `Right AI`, `Right model`, `ModelName`, `#1:`) и очищенные TXT/MD-экспорты.
-- ⚙️ Расширенные разделители для текстовых логов: свои заголовки пользователя/модели и настраиваемый дефолт для нумерованных блоков (`#1:` как ответы модели / запросы / чередование).
-- 🗃 Организация работы: проекты `.slh.json`, категории/группы, заметки к файлам, создание TXT-лога.
-- 🧾 Опциональный показ расширения/типа источника в списке (`JSON · без расширения`, `TXT · txt`).
-- 🔎 Явные режимы поиска: выбранный файл, все открытые файлы, проиндексированная папка, только TXT/MD, JSON/диалоги.
-- 🌙/☀️ Тёмная и светлая темы, 🌐 **русский / английский** интерфейс.
-- 🔍 **Масштаб UI**: кнопки A− / A+, `Ctrl+=` / `Ctrl+-` / `Ctrl+0` (70–200%).
-  Горизонтальных ползунков нет — текст всегда переносится по ширине окна.
-- Поддерживаются и старый формат логов (без `createTime`), и новый.
+- [Русская версия](README.ru.md)
+- [English version](README.en.md)
+- [Project config `.slh.json` — RU](docs/CONFIG.ru.md)
+- [Project config `.slh.json` — EN](docs/CONFIG.en.md)
 
-### Копирование
-- Весь чат / только промты / только ответы / **только размышления**.
-- На каждой карточке: «Копировать», а у сообщений с размышлениями — меню «▾»:
-  **копировать с размышлениями** / **копировать только размышления**.
-- Копирование исходного JSON.
-
-### Экспорт (TXT / HTML / Markdown)
-- **Что экспортировать**: весь чат / только промты / только ответы /
-  только размышления (файлы получают суффиксы `_prompts`, `_answers`,
-  `_thoughts_only`).
-- Нумерация, метки времени, шапка с моделью, системная инструкция,
-  вложения (плейсхолдер + ссылка на Google Drive), рендер Markdown.
-- Размышления: не включать / в сообщения / **отдельным файлом** `*_thoughts`.
-- Подписи ролей: по умолчанию **подпись модели = имя модели из лога**
-  (галочка), либо свои подписи.
-- Массовый экспорт «Экспорт всех…».
-
-### 🔎 Умный поиск (для больших архивов с Google Drive)
-- Индекс на **SQLite FTS5** — встроен в Python, никаких зависимостей.
-- **Инкрементальная индексация**: повторный прогон по той же папке
-  трогает только изменённые файлы (сравнение mtime+size). Исчезнувшие
-  файлы вычищаются из индекса автоматически.
-- Поиск: слова (AND), `"точные фразы"`, префикс последнего слова
-  (`сковород` найдёт «сковородку»), фильтры: промты / ответы /
-  размышления, модель, путь.
-- Дабл-клик по результату открывает лог в просмотрщике.
-- Индекс хранится в `~/.aistudio_parser/index.db`.
-
-### Надёжность
-- Битые/чужие файлы пропускаются с отчётом.
-- Не падает без: модели, ролей, размышлений, времени, `runSettings`,
-  финального ответа (оборванная генерация).
-- Кодировки: UTF-8 / UTF-8-BOM / UTF-16 / CP1251.
-
-## Установка и запуск
+## Quick start
 
 ```bash
-pip install PySide6
-python app.py                # GUI
-python app.py файл папка     # сразу с файлами
+pip install -r requirements.txt
+python app.py
 ```
 
-## CLI
+CLI:
 
 ```bash
-# экспорт
-python cli.py chat_log                                    # инфо
-python cli.py logs/ -f html --thoughts separate -o out/
-python cli.py chat_log -f txt --content answers -o out/   # только ответы
-python cli.py chat_log -f md --content thoughts -o out/   # только размышления
-python cli.py chat_log --model-label "Гемини" -o out/     # своя подпись
-
-# поиск по большому архиву
-python cli.py index D:/GoogleDrive                        # построить/обновить
-python cli.py search "сковородка" --in thoughts
-python cli.py search "frying pan" --model 2.5-pro --limit 20
-python cli.py stats                                       # размер индекса
-```
-
-## Структура проекта
-
-| Файл         | Назначение                                              |
-|--------------|---------------------------------------------------------|
-| `core.py`    | Ядро: парсинг, экспортёры TXT/HTML/MD, Markdown-рендер. Без зависимостей. |
-| `indexer.py` | Поисковый индекс SQLite FTS5 (инкрементальный)          |
-| `i18n.py`    | Локализация RU/EN                                       |
-| `app.py`     | GUI на PySide6                                          |
-| `cli.py`     | Консольная утилита (export / index / search / stats)    |
-| `assets/icons/` | Кастомные PNG-иконки приложения и карточек; если файла нет, GUI безопасно показывает эмодзи/текст |
-
-## Формат лога AI Studio (кратко)
-
-```jsonc
-{
-  "runSettings":      { "model": "...", "temperature": 1.0, ... },
-  "systemInstruction": { },
-  "chunkedPrompt": {
-    "chunks": [
-      { "role": "user",  "text": "...", "tokenCount": 117 },        // createTime может отсутствовать (старый формат)
-      { "role": "model", "isThought": true, "text": "..." },        // размышления
-      { "role": "model", "text": "...", "finishReason": "STOP" },
-      { "role": "user",  "driveImage": { "id": "..." } }            // вложение
-    ]
-  }
-}
+python cli.py export path/to/log -f txt -o out/
+python cli.py index path/to/archive
+python cli.py search "query"
 ```

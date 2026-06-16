@@ -255,51 +255,6 @@ class TextSeparatorsDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
         self._load()
-        self.cmb_profile.currentIndexChanged.connect(self._apply_profile)
-
-    def _set_combo_data(self, cmb, value):
-        i = cmb.findData(value)
-        if i >= 0:
-            cmb.setCurrentIndex(i)
-
-    def _apply_profile(self):
-        data = self.cmb_profile.currentData()
-        if not isinstance(data, dict):
-            return
-        self._set_combo_data(self.cmb_fmt, data.get("fmt", "txt"))
-        self._set_combo_data(self.cmb_content, data.get("content", core.CONTENT_ALL))
-        self._set_combo_data(self.cmb_th, data.get("thoughts", core.THOUGHTS_EXCLUDE))
-        if "numbering" in data:
-            self.chk_num.setChecked(bool(data["numbering"]))
-        if "timestamps" in data:
-            self.chk_time.setChecked(bool(data["timestamps"]))
-        if "metadata" in data:
-            self.chk_meta.setChecked(bool(data["metadata"]))
-
-    def _save_profile_from_current(self):
-        name, ok = QInputDialog.getText(self, tr("exp_title"), tr("profile_name"))
-        name = name.strip()
-        if not ok or not name:
-            return
-        try:
-            profiles = json.loads(self._s.value("exp/profiles", "{}"))
-            if not isinstance(profiles, dict):
-                profiles = {}
-        except Exception:
-            profiles = {}
-        profiles[name] = {
-            "fmt": self.cmb_fmt.currentData(),
-            "content": self.cmb_content.currentData(),
-            "thoughts": self.cmb_th.currentData(),
-            "numbering": self.chk_num.isChecked(),
-            "timestamps": self.chk_time.isChecked(),
-            "metadata": self.chk_meta.isChecked(),
-        }
-        self._s.setValue("exp/profiles", json.dumps(profiles, ensure_ascii=False))
-        self.cmb_profile.addItem(name, profiles[name])
-        self.cmb_profile.setCurrentIndex(self.cmb_profile.count() - 1)
-        if self.parent():
-            self.parent().statusBar().showMessage(tr("profile_saved", name=name), 4000)
 
     def _load(self):
         self.ed_user.setPlainText(self._s.value("parse/user_headers", ""))
@@ -321,6 +276,43 @@ class TextSeparatorsDialog(QDialog):
         self._s.setValue("parse/numbered_mode", opts.numbered_mode)
         return opts
 
+
+
+class CopySettingsDialog(QDialog):
+    def __init__(self, parent, settings: QSettings):
+        super().__init__(parent)
+        self.setWindowTitle(tr("copy_settings_title"))
+        self.setMinimumWidth(460)
+        self._s = settings
+        lay = QVBoxLayout(self)
+        self.chk_service = QCheckBox(tr("copy_include_service"))
+        self.chk_service.setChecked(self._s.value("copy/include_service", "true") == "true")
+        lay.addWidget(self.chk_service)
+        form = QFormLayout()
+        self.cmb_sep = QComboBox()
+        self.cmb_sep.addItem(tr("copy_sep_blank"), "blank")
+        self.cmb_sep.addItem(tr("copy_sep_double"), "double")
+        self.cmb_sep.addItem(tr("copy_sep_long"), "long")
+        self.cmb_sep.addItem(tr("copy_sep_custom"), "custom")
+        cur = self._s.value("copy/separator", "blank")
+        i = self.cmb_sep.findData(cur)
+        self.cmb_sep.setCurrentIndex(i if i >= 0 else 0)
+        self.ed_custom = QLineEdit()
+        self.ed_custom.setText(self._s.value("copy/custom_separator", "\n---\n"))
+        form.addRow(tr("copy_separator"), self.cmb_sep)
+        form.addRow(tr("copy_custom_separator"), self.ed_custom)
+        lay.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(tr("sep_save"))
+        bb.button(QDialogButtonBox.Cancel).setText(tr("cancel"))
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def save(self):
+        self._s.setValue("copy/include_service", "true" if self.chk_service.isChecked() else "false")
+        self._s.setValue("copy/separator", self.cmb_sep.currentData())
+        self._s.setValue("copy/custom_separator", self.ed_custom.text())
 
 class BatchExportDialog(QDialog):
     def __init__(self, parent, settings: QSettings, selected_count: int, all_count: int,
@@ -1033,6 +1025,22 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr("note_saved"), 4000)
 
 
+
+    def reveal_current_file(self):
+        if not self._need_chat():
+            return
+        p = Path(self.current.path)
+        if not p.exists():
+            QMessageBox.information(self, APP_NAME, tr("reveal_no_file"))
+            return
+        if sys.platform == "win32":
+            import subprocess
+            subprocess.Popen(["explorer", f"/select,{p}"])
+            return
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p.parent)))
+
     def set_tags_current(self):
         if not self._need_chat():
             return
@@ -1177,7 +1185,17 @@ class MainWindow(QMainWindow):
         if p.exists():
             QMessageBox.warning(self, APP_NAME, f"File exists: {p}")
             return
-        p.write_text("User:\n[новый запрос]\n\nModel:\n[новый ответ]\n", encoding="utf-8")
+        clip = QGuiApplication.clipboard().text().strip()
+        if clip:
+            content = "User:\n[добавьте запрос или описание главы]\n\nModel:\n" + clip + "\n"
+        else:
+            content = (
+                "User:\n"
+                "[сюда можно вставить запрос, план главы или пометку]\n\n"
+                "Model:\n"
+                "[сюда можно вставить цельный ответ модели / главу / фрагмент]\n"
+            )
+        p.write_text(content, encoding="utf-8")
         self.settings.setValue("ui/last_dir", folder)
         self.statusBar().showMessage(tr("text_log_created", path=str(p)), 5000)
         self.load_paths([str(p)], select_path=str(p))
@@ -1214,6 +1232,8 @@ class MainWindow(QMainWindow):
         m.addAction(tr("copy_prompts"), lambda: self.copy_chat(core.COPY_PROMPTS))
         m.addAction(tr("copy_answers"), lambda: self.copy_chat(core.COPY_ANSWERS))
         m.addAction(tr("copy_thoughts"), lambda: self.copy_chat(core.COPY_THOUGHTS))
+        m.addSeparator()
+        m.addAction(tr("copy_settings"), self.open_copy_settings)
         self.btn_copy.setMenu(m)
         self._decorate_button(self.btn_copy, "export.png", 130)
         top.addWidget(self.btn_copy)
@@ -1255,6 +1275,7 @@ class MainWindow(QMainWindow):
         om.addAction(tr("assign_category"), self.assign_category_current)
         om.addAction(tr("set_tags_current"), self.set_tags_current)
         om.addAction(tr("project_note_current"), self.set_note_current)
+        om.addAction(tr("reveal_current_file"), self.reveal_current_file)
         om.addSeparator()
         om.addAction(tr("new_text_log"), self.create_text_log)
         self.btn_org.setMenu(om)
@@ -1900,8 +1921,53 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+
+    def open_copy_settings(self):
+        dlg = CopySettingsDialog(self, self.settings)
+        if dlg.exec() == QDialog.Accepted:
+            dlg.save()
+            self.statusBar().showMessage(tr("copy_settings_saved"), 4000)
+
+    def _copy_separator(self) -> str:
+        mode = self.settings.value("copy/separator", "blank")
+        if mode == "double":
+            return "\n\n\n"
+        if mode == "long":
+            return "\n\n" + "—" * 70 + "\n\n"
+        if mode == "custom":
+            raw = self.settings.value("copy/custom_separator", "\n---\n")
+            return raw.replace("\\n", "\n")
+        return "\n\n"
+
+    def _clean_copy_text(self, chat: core.ChatLog, which: str) -> str:
+        parts = []
+        for msg in chat.messages:
+            if which == core.COPY_PROMPTS and not msg.is_user:
+                continue
+            if which == core.COPY_ANSWERS and msg.is_user:
+                continue
+            if which == core.COPY_THOUGHTS:
+                if msg.has_thoughts:
+                    parts.extend(t.strip() for t in msg.thoughts if t.strip())
+                continue
+            text = msg.text.strip()
+            if text:
+                parts.append(text)
+        return self._copy_separator().join(parts).strip() + ("\n" if parts else "")
+
     def copy_chat(self, which):
         if not self._need_chat():
+            return
+        include_service = self.settings.value("copy/include_service", "true") == "true"
+        if not include_service:
+            text = self._clean_copy_text(self.current, which)
+            QGuiApplication.clipboard().setText(text)
+            names = {core.COPY_ALL: tr("copy_all"),
+                     core.COPY_PROMPTS: tr("copy_prompts"),
+                     core.COPY_ANSWERS: tr("copy_answers"),
+                     core.COPY_THOUGHTS: tr("copy_thoughts")}
+            self.statusBar().showMessage(
+                tr("copied_n", what=names[which], n=len(text)), 5000)
             return
         opts = core.ExportOptions(
             fmt="txt", metadata=False, system_instruction=False,
