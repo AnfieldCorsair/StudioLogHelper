@@ -354,6 +354,32 @@ def _flush_text_msg(chat: ChatLog, role: Optional[str], buf: list):
         chat.messages.append(Message(role=role, text=text))
 
 
+def _parse_export_header(line: str) -> Optional[tuple[int, str]]:
+    """Распознаёт только реальные заголовки экспортированных сообщений.
+
+    Важно: Markdown-заголовки внутри ответа (`#### 1. Python`) и горизонтальные
+    линии (`---`) не должны дробить сообщение. Поэтому принимаем только формы:
+      --- #4 МОДЕЛЬ -----
+      #4: text              (обрабатывается отдельно numbered_re)
+      ## #4 МОДЕЛЬ
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    # TXT export: --- #4 МОДЕЛЬ --------------------------------------
+    m = re.match(r"^-{3,}\s*#(?P<num>\d+)\s+(?P<label>.*?)\s*-{3,}\s*$", stripped)
+    if m:
+        return int(m.group("num")), m.group("label").strip()
+
+    # Markdown export: ## #4 МОДЕЛЬ  (именно #4 после markdown-решёток)
+    m = re.match(r"^#{1,6}\s+#(?P<num>\d+)\s+(?P<label>.+?)\s*$", stripped)
+    if m:
+        return int(m.group("num")), m.group("label").strip()
+
+    return None
+
+
 def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions] = None) -> ChatLog:
     """Разбор plain-text логов: Arena AI, экспортов этой программы и простых диалогов.
 
@@ -372,11 +398,6 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
     buf: list = []
     saw_numbered = False
 
-    # Заголовки экспортов: "--- #2 gemini-2.5-pro ----" / "## #2 MODEL".
-    export_re = re.compile(
-        r"^\s*(?:---+|#{1,6})\s*#?(?P<num>\d+)?\s*(?P<label>[^\-#\n]{1,80}?)\s*(?:---+)?\s*$",
-        re.I,
-    )
     numbered_re = re.compile(r"^\s*#(?P<num>\d+)\s*:\s*(?P<rest>.*)$")
     plain_header_re = re.compile(r"^\s*(?P<header>[\wА-Яа-яЁё][\wА-Яа-яЁё ._-]{0,60})\s*:\s*(?P<rest>.*)$")
 
@@ -412,29 +433,17 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
                 buf.append(rest)
             continue
 
-        m = export_re.match(line)
-        if m:
-            label = (m.group("label") or "").strip()
-            # Убираем номер, если он попал в label, и служебные скобки времени.
-            label = re.sub(r"^#?\d+\s*", "", label).strip()
-            label = re.sub(r"\[[^\]]+\]", "", label).strip()
-            detected = _role_from_header(label, opts)
-            # В очищенных экспортах подпись модели часто равна имени модели
-            # (например, "#2 Arena AI"), поэтому роль восстанавливаем по номеру.
-            # Но обычные Markdown-заголовки вроде "#### 1. Python" не должны
-            # становиться новым сообщением. Для Markdown-экспорта номер должен
-            # быть именно "#2" после решёток, а не "1." как в списке/заголовке.
-            stripped_line = line.lstrip()
-            numbered_export_header = stripped_line.startswith("---") or bool(
-                re.match(r"^#{1,6}\s+#\d+", stripped_line)
-            )
-            if not detected and m.group("num") and numbered_export_header:
-                detected = _role_for_number(int(m.group("num")), opts)
-            if detected:
-                _flush_text_msg(chat, role, buf)
-                buf = []
-                role = detected
-                continue
+        exported = _parse_export_header(line)
+        if exported:
+            n, label = exported
+            # Убираем служебные скобки времени и хвостовые разделители.
+            label = re.sub(r"\[[^\]]+\]", "", label).strip(" -—	")
+            detected = _role_from_header(label, opts) or _role_for_number(n, opts)
+            _flush_text_msg(chat, role, buf)
+            buf = []
+            saw_numbered = True
+            role = detected
+            continue
 
         m = plain_header_re.match(line)
         if m:
@@ -468,35 +477,55 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
 def parse_file(path, text_options: Optional[TextParseOptions] = None) -> ChatLog:
     """Читает и парсит файл.
 
-    Сначала пробует JSON-лог Google AI Studio, затем plain-text логи Arena AI
-    и очищенные экспорты (TXT/MD) этой же программы.
+    Оптимизация: для явных текстовых файлов и файлов, которые не начинаются с
+    JSON-объекта/массива, сначала пробуем дешёвую эвристику текстового лога.
+    Это сильно ускоряет открытие папок с большими TXT-экспортами.
     """
     p = Path(path)
     raw_bytes = p.read_bytes()
     data = None
     last_err = None
     text_candidates = []
+
+    # Сначала декодируем. JSON будем парсить только если файл реально похож на JSON.
     for enc in ("utf-8", "utf-8-sig", "utf-16", "cp1251"):
         try:
             decoded = raw_bytes.decode(enc)
             text_candidates.append(decoded)
-            data = json.loads(decoded)
-            break
         except UnicodeDecodeError as e:
             last_err = e
+
+    # TXT/MD/LOG и любой не-JSON-подобный текст: быстрый путь без json.loads
+    # на многомегабайтном тексте.
+    suffix = p.suffix.lower()
+    for decoded_text in text_candidates:
+        stripped = decoded_text.lstrip("\ufeff\x00\n\r\t ")
+        looks_jsonish = stripped.startswith("{") or stripped.startswith("[")
+        if (suffix in {".txt", ".md", ".log", ".text"} or not looks_jsonish):
+            if looks_like_text_log_text(decoded_text):
+                return parse_text_log(decoded_text, str(p), text_options)
+            if not looks_jsonish:
+                # Это обычный текст, но не диалоговый лог.
+                break
+
+    # JSON-путь: нужен для AI Studio и файлов без расширения с Google Drive.
+    for decoded in text_candidates:
+        stripped = decoded.lstrip("\ufeff\x00\n\r\t ")
+        if not (stripped.startswith("{") or stripped.startswith("[")):
+            continue
+        try:
+            data = json.loads(decoded)
+            break
         except json.JSONDecodeError as e:
             last_err = e
     if data is not None:
         return parse_data(data, str(p))
 
-    # JSON не прочитался — пробуем текстовые диалоги во всех кодировках,
-    # потому что plain-text UTF-16 может формально декодироваться как UTF-8
-    # с NUL-символами, но не распознаться эвристикой.
+    # Запасной текстовый путь для UTF-16/сложных случаев.
     for decoded_text in text_candidates:
         if looks_like_text_log_text(decoded_text):
             return parse_text_log(decoded_text, str(p), text_options)
     raise ParseError(tr("core_err_json", err=last_err))
-
 
 def looks_like_log(path) -> bool:
     """Быстрая эвристика: стоит ли пытаться парсить файл из папки."""

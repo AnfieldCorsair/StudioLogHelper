@@ -38,7 +38,9 @@ ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 70, 200, 10
 BASE_FONT_PT = 10.0
 RESPONSIVE_ICON_ONLY_ZOOM = 150
 RESPONSIVE_ICON_ONLY_WIDTH = 980
-VIEW_BATCH = 60
+VIEW_BATCH = 20
+LONG_MESSAGE_PREVIEW_CHARS = 5000
+RAW_PREVIEW_LIMIT = 1_500_000
 
 # ----------------------------------------------------------------------------
 # Темы
@@ -660,13 +662,49 @@ class MessageCard(QFrame):
 
         # текст
         text = msg.text.strip()
+        self._body = None
+        self._toggle_btn = None
+        self._full_text = text
+        self._rich = render_md and not msg.is_user
+        self._collapsed = False
         if text:
-            body = self._make_body(text, render_md and not msg.is_user)
-            lay.addWidget(body)
+            if len(text) > LONG_MESSAGE_PREVIEW_CHARS:
+                self._collapsed = True
+                body = self._make_body(self._preview_text(text), False)
+                self._body = body
+                lay.addWidget(body)
+                self._toggle_btn = QPushButton(tr("expand_message"))
+                self._toggle_btn.clicked.connect(self._toggle_collapsed)
+                lay.addWidget(self._toggle_btn)
+            else:
+                body = self._make_body(text, self._rich)
+                lay.addWidget(body)
         elif not msg.attachments and not msg.has_thoughts:
             e = QLabel(tr("empty_message"))
             e.setObjectName("muted")
             lay.addWidget(e)
+
+    def _preview_text(self, text: str) -> str:
+        return text[:LONG_MESSAGE_PREVIEW_CHARS].rstrip() + "\n\n… " + tr("collapsed_tail", n=len(text) - LONG_MESSAGE_PREVIEW_CHARS)
+
+    def _set_body_text(self, text: str, rich: bool):
+        if self._body is None:
+            return
+        if rich:
+            self._body.setTextFormat(Qt.RichText)
+            self._body.setText(core.markdown_to_html(text))
+        else:
+            self._body.setTextFormat(Qt.PlainText)
+            self._body.setText(text)
+
+    def _toggle_collapsed(self):
+        self._collapsed = not self._collapsed
+        if self._collapsed:
+            self._set_body_text(self._preview_text(self._full_text), False)
+            self._toggle_btn.setText(tr("expand_message"))
+        else:
+            self._set_body_text(self._full_text, self._rich)
+            self._toggle_btn.setText(tr("collapse_message"))
 
     def _make_body(self, text: str, rich: bool) -> QLabel:
         body = QLabel()
@@ -1871,14 +1909,19 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(1, tr("source_json"))
             self.b_copy_raw.setText(tr("copy_source_json"))
             try:
-                self.raw_view.setPlainText(
-                    json.dumps(chat.raw, ensure_ascii=False, indent=2))
+                raw = json.dumps(chat.raw, ensure_ascii=False, indent=2)
+                if len(raw) > RAW_PREVIEW_LIMIT:
+                    raw = raw[:RAW_PREVIEW_LIMIT] + tr("raw_preview_truncated", shown=RAW_PREVIEW_LIMIT, total=len(raw))
+                self.raw_view.setPlainText(raw)
             except (TypeError, ValueError):
                 self.raw_view.setPlainText("<JSON?>")
         else:
             self.tabs.setTabText(1, tr("source_text"))
             self.b_copy_raw.setText(tr("copy_source_text"))
-            self.raw_view.setPlainText(chat.raw_text or "")
+            raw = chat.raw_text or ""
+            if len(raw) > RAW_PREVIEW_LIMIT:
+                raw = raw[:RAW_PREVIEW_LIMIT] + tr("raw_preview_truncated", shown=RAW_PREVIEW_LIMIT, total=len(raw))
+            self.raw_view.setPlainText(raw)
 
         QTimer.singleShot(0, lambda:
                           self.scroll.verticalScrollBar().setValue(0))
@@ -1989,7 +2032,10 @@ class MainWindow(QMainWindow):
     def copy_raw(self):
         if not self._need_chat():
             return
-        QGuiApplication.clipboard().setText(self.raw_view.toPlainText())
+        if self.current.source_format == "text":
+            QGuiApplication.clipboard().setText(self.current.raw_text or "")
+        else:
+            QGuiApplication.clipboard().setText(json.dumps(self.current.raw, ensure_ascii=False, indent=2))
         self.statusBar().showMessage(tr("source_copied"), 4000)
 
     # ---------- экспорт ----------

@@ -102,6 +102,7 @@ _RU = {
     "no_extension": "без расширения",
     "source_json": "Исходный JSON",
     "source_text": "Исходный текст",
+    "raw_preview_truncated": "\n\n[Предпросмотр обрезан для скорости. Показано {shown} из {total} символов. Копирование исходника всё равно копирует полный текст.]",
     "copy_source_json": "📋 Копировать JSON",
     "copy_source_text": "📋 Копировать TXT",
     "organize_button": "🗃 Проект и категории ▾",
@@ -196,6 +197,9 @@ _RU = {
     "thoughts_n": "💭 Размышления ({n})",
     "tokens_short": "ток.",
     "empty_message": "[пустое сообщение]",
+    "expand_message": "Развернуть длинный ответ",
+    "collapse_message": "Свернуть ответ",
+    "collapsed_tail": "ответ свёрнут, скрыто символов: {n}",
 
     # --- статусы / сообщения ---
     "msg_copied": "Сообщение скопировано.",
@@ -369,6 +373,7 @@ _EN = {
     "no_extension": "no extension",
     "source_json": "Raw JSON",
     "source_text": "Raw text",
+    "raw_preview_truncated": "\n\n[Preview truncated for performance. Showing {shown} of {total} characters. Source copy still copies full text.]",
     "copy_source_json": "📋 Copy JSON",
     "copy_source_text": "📋 Copy TXT",
     "organize_button": "🗃 Project & categories ▾",
@@ -463,6 +468,9 @@ _EN = {
     "thoughts_n": "💭 Thoughts ({n})",
     "tokens_short": "tok.",
     "empty_message": "[empty message]",
+    "expand_message": "Expand long answer",
+    "collapse_message": "Collapse answer",
+    "collapsed_tail": "message collapsed, hidden characters: {n}",
 
     # --- statuses / messages ---
     "msg_copied": "Message copied.",
