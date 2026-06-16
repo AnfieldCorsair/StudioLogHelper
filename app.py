@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QTabWidget, QPlainTextEdit, QScrollArea,
     QFrame, QDialog, QDialogButtonBox, QCheckBox, QComboBox, QGroupBox,
     QFormLayout, QLineEdit, QStatusBar, QSizePolicy, QProgressDialog,
-    QTextEdit, QInputDialog,
+    QTextEdit, QInputDialog, QAbstractItemView,
 )
 
 import core
@@ -255,6 +255,51 @@ class TextSeparatorsDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
         self._load()
+        self.cmb_profile.currentIndexChanged.connect(self._apply_profile)
+
+    def _set_combo_data(self, cmb, value):
+        i = cmb.findData(value)
+        if i >= 0:
+            cmb.setCurrentIndex(i)
+
+    def _apply_profile(self):
+        data = self.cmb_profile.currentData()
+        if not isinstance(data, dict):
+            return
+        self._set_combo_data(self.cmb_fmt, data.get("fmt", "txt"))
+        self._set_combo_data(self.cmb_content, data.get("content", core.CONTENT_ALL))
+        self._set_combo_data(self.cmb_th, data.get("thoughts", core.THOUGHTS_EXCLUDE))
+        if "numbering" in data:
+            self.chk_num.setChecked(bool(data["numbering"]))
+        if "timestamps" in data:
+            self.chk_time.setChecked(bool(data["timestamps"]))
+        if "metadata" in data:
+            self.chk_meta.setChecked(bool(data["metadata"]))
+
+    def _save_profile_from_current(self):
+        name, ok = QInputDialog.getText(self, tr("exp_title"), tr("profile_name"))
+        name = name.strip()
+        if not ok or not name:
+            return
+        try:
+            profiles = json.loads(self._s.value("exp/profiles", "{}"))
+            if not isinstance(profiles, dict):
+                profiles = {}
+        except Exception:
+            profiles = {}
+        profiles[name] = {
+            "fmt": self.cmb_fmt.currentData(),
+            "content": self.cmb_content.currentData(),
+            "thoughts": self.cmb_th.currentData(),
+            "numbering": self.chk_num.isChecked(),
+            "timestamps": self.chk_time.isChecked(),
+            "metadata": self.chk_meta.isChecked(),
+        }
+        self._s.setValue("exp/profiles", json.dumps(profiles, ensure_ascii=False))
+        self.cmb_profile.addItem(name, profiles[name])
+        self.cmb_profile.setCurrentIndex(self.cmb_profile.count() - 1)
+        if self.parent():
+            self.parent().statusBar().showMessage(tr("profile_saved", name=name), 4000)
 
     def _load(self):
         self.ed_user.setPlainText(self._s.value("parse/user_headers", ""))
@@ -276,6 +321,61 @@ class TextSeparatorsDialog(QDialog):
         self._s.setValue("parse/numbered_mode", opts.numbered_mode)
         return opts
 
+
+class BatchExportDialog(QDialog):
+    def __init__(self, parent, settings: QSettings, selected_count: int, all_count: int,
+                 categories: set):
+        super().__init__(parent)
+        self.setWindowTitle(tr("batch_title"))
+        self.setMinimumWidth(520)
+        self._s = settings
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+        self.cmb_source = QComboBox()
+        self.cmb_source.addItem(tr("batch_selected", n=selected_count), "selected")
+        self.cmb_source.addItem(tr("batch_all_loaded", n=all_count), "all")
+        if selected_count <= 0:
+            self.cmb_source.setCurrentIndex(1)
+        form.addRow(tr("batch_source"), self.cmb_source)
+        self.ed_cat = QLineEdit()
+        self.ed_cat.setPlaceholderText("Только ответы модели по произведению")
+        if categories:
+            self.ed_cat.setText(sorted(categories)[0])
+        form.addRow(tr("batch_result_category"), self.ed_cat)
+        self.ed_note = QLineEdit()
+        self.ed_note.setPlaceholderText("Экспортировано пакетной операцией")
+        form.addRow(tr("batch_note"), self.ed_note)
+        self.ed_tags = QLineEdit()
+        self.ed_tags.setPlaceholderText("answers, novel-x, clean")
+        form.addRow(tr("tags_label"), self.ed_tags)
+        lay.addLayout(form)
+        self.chk_load = QCheckBox(tr("batch_load_results"))
+        self.chk_load.setChecked(True)
+        self.chk_index = QCheckBox(tr("batch_index_results"))
+        self.chk_index.setChecked(True)
+        lay.addWidget(self.chk_load)
+        lay.addWidget(self.chk_index)
+        hint = QLabel(tr("batch_title") + ": " + tr("export_profiles"))
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(tr("exp_ok"))
+        bb.button(QDialogButtonBox.Cancel).setText(tr("cancel"))
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def result_options(self):
+        return {
+            "source": self.cmb_source.currentData(),
+            "category": self.ed_cat.text().strip(),
+            "note": self.ed_note.text().strip(),
+            "tags": [x.strip().lstrip("#") for x in re.split(r"[,;]", self.ed_tags.text()) if x.strip()],
+            "load": self.chk_load.isChecked(),
+            "index": self.chk_index.isChecked(),
+        }
+
 class ExportDialog(QDialog):
     def __init__(self, parent, settings: QSettings, batch_count: int = 1):
         super().__init__(parent)
@@ -284,6 +384,26 @@ class ExportDialog(QDialog):
         self._s = settings
 
         lay = QVBoxLayout(self)
+
+        prof_row = QHBoxLayout()
+        prof_row.addWidget(QLabel(tr("export_profiles")))
+        self.cmb_profile = QComboBox()
+        self.cmb_profile.addItem(tr("profile_none"), None)
+        self.cmb_profile.addItem(tr("profile_answers_txt"), {"fmt": "txt", "content": core.CONTENT_ANSWERS, "thoughts": core.THOUGHTS_EXCLUDE})
+        self.cmb_profile.addItem(tr("profile_full_txt"), {"fmt": "txt", "content": core.CONTENT_ALL, "thoughts": core.THOUGHTS_EXCLUDE})
+        self.cmb_profile.addItem(tr("profile_full_md"), {"fmt": "md", "content": core.CONTENT_ALL, "thoughts": core.THOUGHTS_EXCLUDE})
+        self.cmb_profile.addItem(tr("profile_prompts_txt"), {"fmt": "txt", "content": core.CONTENT_PROMPTS, "thoughts": core.THOUGHTS_EXCLUDE})
+        try:
+            for name, data in json.loads(self._s.value("exp/profiles", "{}" )).items():
+                if isinstance(data, dict):
+                    self.cmb_profile.addItem(name, data)
+        except Exception:
+            pass
+        b_save_profile = QPushButton(tr("profile_save"))
+        b_save_profile.clicked.connect(self._save_profile_from_current)
+        prof_row.addWidget(self.cmb_profile, 1)
+        prof_row.addWidget(b_save_profile)
+        lay.addLayout(prof_row)
 
         gb_fmt = QGroupBox(tr("exp_format"))
         f = QFormLayout(gb_fmt)
@@ -350,6 +470,51 @@ class ExportDialog(QDialog):
         lay.addWidget(bb)
 
         self._load()
+        self.cmb_profile.currentIndexChanged.connect(self._apply_profile)
+
+    def _set_combo_data(self, cmb, value):
+        i = cmb.findData(value)
+        if i >= 0:
+            cmb.setCurrentIndex(i)
+
+    def _apply_profile(self):
+        data = self.cmb_profile.currentData()
+        if not isinstance(data, dict):
+            return
+        self._set_combo_data(self.cmb_fmt, data.get("fmt", "txt"))
+        self._set_combo_data(self.cmb_content, data.get("content", core.CONTENT_ALL))
+        self._set_combo_data(self.cmb_th, data.get("thoughts", core.THOUGHTS_EXCLUDE))
+        if "numbering" in data:
+            self.chk_num.setChecked(bool(data["numbering"]))
+        if "timestamps" in data:
+            self.chk_time.setChecked(bool(data["timestamps"]))
+        if "metadata" in data:
+            self.chk_meta.setChecked(bool(data["metadata"]))
+
+    def _save_profile_from_current(self):
+        name, ok = QInputDialog.getText(self, tr("exp_title"), tr("profile_name"))
+        name = name.strip()
+        if not ok or not name:
+            return
+        try:
+            profiles = json.loads(self._s.value("exp/profiles", "{}"))
+            if not isinstance(profiles, dict):
+                profiles = {}
+        except Exception:
+            profiles = {}
+        profiles[name] = {
+            "fmt": self.cmb_fmt.currentData(),
+            "content": self.cmb_content.currentData(),
+            "thoughts": self.cmb_th.currentData(),
+            "numbering": self.chk_num.isChecked(),
+            "timestamps": self.chk_time.isChecked(),
+            "metadata": self.chk_meta.isChecked(),
+        }
+        self._s.setValue("exp/profiles", json.dumps(profiles, ensure_ascii=False))
+        self.cmb_profile.addItem(name, profiles[name])
+        self.cmb_profile.setCurrentIndex(self.cmb_profile.count() - 1)
+        if self.parent():
+            self.parent().statusBar().showMessage(tr("profile_saved", name=name), 4000)
 
     def _load(self):
         s = self._s
@@ -565,6 +730,7 @@ class MainWindow(QMainWindow):
         self.render_md = self.settings.value("ui/render_md", "true") == "true"
         self.show_thoughts = self.settings.value("ui/show_thoughts", "true") == "true"
         self.show_extensions = self.settings.value("ui/show_extensions", "false") == "true"
+        self.show_diagnostics = self.settings.value("ui/show_diagnostics", "false") == "true"
         try:
             self.zoom = int(self.settings.value("ui/zoom", 100))
         except (TypeError, ValueError):
@@ -577,9 +743,12 @@ class MainWindow(QMainWindow):
         self.current: core.ChatLog | None = None
         self.chat_categories: dict = self._load_chat_categories()
         self.chat_notes: dict = self._load_chat_notes()
+        self.chat_tags: dict = self._load_chat_tags()
+        self.chat_derived: dict = self._load_chat_derived()
         self.categories: set = set(v for v in self.chat_categories.values() if v)
         self.project_name = self.settings.value("org/project_name", "")
         self.project_path = self.settings.value("org/project_path", "")
+        self.recent_projects = self._load_recent_projects()
         self._index = None       # ленивый SearchIndex
         self._zoom_timer = QTimer(self)
         self._zoom_timer.setSingleShot(True)
@@ -587,6 +756,9 @@ class MainWindow(QMainWindow):
         self._pending_rebuild = False
         self._render_generation = 0
         self._render_next = 0
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(self._autosave_project)
+        self._autosave_timer.start(30000)
 
         self._build_ui()
         self.apply_theme()
@@ -602,6 +774,46 @@ class MainWindow(QMainWindow):
             model_headers=split_saved(self.settings.value("parse/model_headers", "")),
             numbered_mode=self.settings.value("parse/numbered_mode", "model"),
         )
+
+
+    def _load_json_setting(self, key: str, default):
+        try:
+            data = json.loads(self.settings.value(key, json.dumps(default, ensure_ascii=False)))
+            return data if isinstance(data, type(default)) else default
+        except Exception:
+            return default
+
+    def _save_json_setting(self, key: str, value):
+        self.settings.setValue(key, json.dumps(value, ensure_ascii=False))
+
+    def _load_chat_tags(self) -> dict:
+        return self._load_json_setting("org/chat_tags", {})
+
+    def _save_chat_tags(self):
+        self._save_json_setting("org/chat_tags", self.chat_tags)
+
+    def _load_chat_derived(self) -> dict:
+        return self._load_json_setting("org/chat_derived", {})
+
+    def _save_chat_derived(self):
+        self._save_json_setting("org/chat_derived", self.chat_derived)
+
+    def _load_recent_projects(self) -> list:
+        data = self._load_json_setting("org/recent_projects", [])
+        return [x for x in data if isinstance(x, str) and x]
+
+    def _save_recent_projects(self):
+        self._save_json_setting("org/recent_projects", self.recent_projects[:10])
+
+    def _remember_project(self, path: str):
+        if not path:
+            return
+        self.recent_projects = [path] + [p for p in self.recent_projects if p != path]
+        self._save_recent_projects()
+
+    def _chat_tags(self, chat) -> list:
+        vals = self.chat_tags.get(chat.path, [])
+        return vals if isinstance(vals, list) else []
 
     def _load_chat_categories(self) -> dict:
         try:
@@ -660,22 +872,30 @@ class MainWindow(QMainWindow):
         self.categories.clear()
         self.chat_categories.clear()
         self.chat_notes.clear()
+        self.chat_tags.clear()
+        self.chat_derived.clear()
         self.settings.setValue("org/project_name", name)
         self.settings.setValue("org/project_path", "")
         self._save_chat_categories()
         self._save_chat_notes()
+        self._save_chat_tags()
+        self._save_chat_derived()
+        self._refresh_filter_controls()
         self._refresh_file_list()
         self.statusBar().showMessage(tr("project_created", name=name), 5000)
 
     def _project_doc(self) -> dict:
         files = []
         known = {c.path: c for c in self.chats}
-        for path in sorted(set(known) | set(self.chat_categories) | set(self.chat_notes)):
+        for path in sorted(set(known) | set(self.chat_categories) | set(self.chat_notes)
+                           | set(self.chat_tags) | set(self.chat_derived)):
             chat = known.get(path)
             item = {
                 "path": path,
                 "category": self.chat_categories.get(path, ""),
                 "note": self.chat_notes.get(path, ""),
+                "tags": self.chat_tags.get(path, []),
+                "derived_from": self.chat_derived.get(path, ""),
             }
             if chat:
                 item.update({
@@ -702,6 +922,17 @@ class MainWindow(QMainWindow):
             "ui": {"show_extensions": self.show_extensions, "theme": self.theme_name},
         }
 
+    def _write_project(self, path: str):
+        if not path:
+            return
+        doc = self._project_doc()
+        Path(path).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.project_path = path
+        self.settings.setValue("org/project_path", path)
+        if self.project_name:
+            self.settings.setValue("org/project_name", self.project_name)
+        self._remember_project(path)
+
     def save_project(self):
         last = self.project_path or self.settings.value("ui/last_dir", str(Path.home()))
         path, _ = QFileDialog.getSaveFileName(
@@ -710,18 +941,23 @@ class MainWindow(QMainWindow):
             return
         if not path.endswith(".json"):
             path += ".slh.json"
-        self.project_path = path
-        doc = self._project_doc()
-        Path(path).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.settings.setValue("org/project_path", path)
-        if self.project_name:
-            self.settings.setValue("org/project_name", self.project_name)
+        self._write_project(path)
         self.statusBar().showMessage(tr("project_saved", path=path), 6000)
 
-    def open_project(self):
-        last = self.project_path or self.settings.value("ui/last_dir", str(Path.home()))
-        path, _ = QFileDialog.getOpenFileName(
-            self, tr("project_open"), last, "StudioLogHelper Project (*.slh.json *.json);;All files (*)")
+    def _autosave_project(self):
+        if not self.project_path:
+            return
+        try:
+            self._write_project(self.project_path)
+        except OSError:
+            return
+
+    def closeEvent(self, e):
+        self._autosave_project()
+        super().closeEvent(e)
+
+
+    def open_project_path(self, path: str):
         if not path:
             return
         try:
@@ -729,11 +965,16 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as ex:
             QMessageBox.warning(self, APP_NAME, str(ex))
             return
+        self._load_project_doc(doc, path)
+
+    def _load_project_doc(self, doc: dict, path: str):
         self.project_path = path
         self.project_name = (doc.get("project") or {}).get("name", "")
         self.categories = set(x for x in doc.get("categories", []) if isinstance(x, str))
         self.chat_categories.clear()
         self.chat_notes.clear()
+        self.chat_tags.clear()
+        self.chat_derived.clear()
         load_paths = []
         for item in doc.get("files", []):
             if not isinstance(item, dict):
@@ -743,20 +984,37 @@ class MainWindow(QMainWindow):
                 continue
             cat = item.get("category", "")
             note = item.get("note", "")
+            tags = item.get("tags", [])
+            derived = item.get("derived_from", "")
             if cat:
                 self.chat_categories[f] = cat
                 self.categories.add(cat)
             if note:
                 self.chat_notes[f] = note
+            if isinstance(tags, list) and tags:
+                self.chat_tags[f] = [str(x).strip() for x in tags if str(x).strip()]
+            if derived:
+                self.chat_derived[f] = str(derived)
             if Path(f).exists():
                 load_paths.append(f)
         self._save_chat_categories()
         self._save_chat_notes()
+        self._save_chat_tags()
+        self._save_chat_derived()
         self.settings.setValue("org/project_path", path)
         self.settings.setValue("org/project_name", self.project_name)
         self.load_paths(load_paths)
         self._refresh_file_list()
+        self._remember_project(path)
         self.statusBar().showMessage(tr("project_loaded", path=path), 6000)
+
+    def open_project(self):
+        last = self.project_path or self.settings.value("ui/last_dir", str(Path.home()))
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("project_open"), last, "StudioLogHelper Project (*.slh.json *.json);;All files (*)")
+        if not path:
+            return
+        self.open_project_path(path)
 
     def set_note_current(self):
         if not self._need_chat():
@@ -774,12 +1032,48 @@ class MainWindow(QMainWindow):
         self._rebuild_view()
         self.statusBar().showMessage(tr("note_saved"), 4000)
 
+
+    def set_tags_current(self):
+        if not self._need_chat():
+            return
+        current = ", ".join(self._chat_tags(self.current))
+        raw, ok = QInputDialog.getText(self, APP_NAME, tr("tags_prompt"), text=current)
+        if not ok:
+            return
+        tags = []
+        seen = set()
+        for t in re.split(r"[,;]", raw):
+            t = t.strip().lstrip("#")
+            if t and t.lower() not in seen:
+                tags.append(t)
+                seen.add(t.lower())
+        if tags:
+            self.chat_tags[self.current.path] = tags
+        else:
+            self.chat_tags.pop(self.current.path, None)
+        self._save_chat_tags()
+        self._refresh_filter_controls()
+        self._refresh_file_list(select_path=self.current.path)
+        self._rebuild_view()
+        self.statusBar().showMessage(tr("tags_saved"), 4000)
+
+    def _selected_chats(self) -> list:
+        selected = []
+        for it in self.file_list.selectedItems():
+            path = it.data(Qt.UserRole)
+            for c in self.chats:
+                if c.path == path:
+                    selected.append(c)
+                    break
+        return selected
+
     def create_category(self):
         name, ok = QInputDialog.getText(self, APP_NAME, tr("category_name"))
         name = name.strip()
         if not ok or not name:
             return
         self.categories.add(name)
+        self._refresh_filter_controls()
         self.statusBar().showMessage(tr("category_created", name=name), 4000)
 
     def assign_category_current(self):
@@ -794,8 +1088,78 @@ class MainWindow(QMainWindow):
         self.categories.add(name)
         self.chat_categories[self.current.path] = name
         self._save_chat_categories()
+        self._refresh_filter_controls()
         self._refresh_file_list(select_path=self.current.path)
         self.statusBar().showMessage(tr("category_assigned", name=name), 4000)
+
+
+    def batch_export_set(self):
+        selected = self._selected_chats()
+        if not self.chats:
+            QMessageBox.information(self, APP_NAME, tr("batch_no_files"))
+            return
+        bd = BatchExportDialog(self, self.settings, len(selected), len(self.chats), self.categories)
+        if bd.exec() != QDialog.Accepted:
+            return
+        bopts = bd.result_options()
+        chats = selected if bopts["source"] == "selected" and selected else list(self.chats)
+        if not chats:
+            QMessageBox.information(self, APP_NAME, tr("batch_no_files"))
+            return
+        # Обычный диалог экспорта остаётся — профили можно выбрать там, ничего не навязываем.
+        dlg = ExportDialog(self, self.settings, batch_count=len(chats))
+        if dlg.exec() != QDialog.Accepted:
+            return
+        opts = dlg.options()
+        last = self.settings.value("ui/export_dir", self.settings.value("ui/last_dir", str(Path.home())))
+        out_dir = QFileDialog.getExistingDirectory(self, tr("dlg_save_dir"), last)
+        if not out_dir:
+            return
+        self.settings.setValue("ui/export_dir", out_dir)
+        created, errors = [], []
+        source_by_out = {}
+        for chat in chats:
+            try:
+                paths = core.export_to_files(chat, opts, out_dir)
+                created.extend(paths)
+                for cp in paths:
+                    source_by_out[cp] = chat.path
+            except (OSError, ValueError) as ex:
+                errors.append(f"{chat.title}: {ex}")
+        cat = bopts["category"]
+        note = bopts["note"]
+        tags = bopts.get("tags") or []
+        if cat:
+            self.categories.add(cat)
+        if bopts["load"] and created:
+            self.load_paths(created)
+            for cp in created:
+                if cat:
+                    self.chat_categories[cp] = cat
+                if note:
+                    self.chat_notes[cp] = note
+                if tags:
+                    self.chat_tags[cp] = tags
+                if source_by_out.get(cp):
+                    self.chat_derived[cp] = source_by_out[cp]
+            self._save_chat_categories()
+            self._save_chat_notes()
+            self._save_chat_tags()
+            self._save_chat_derived()
+            self._refresh_filter_controls()
+            self._refresh_file_list()
+        if bopts["index"] and created:
+            try:
+                idx = self._get_index()
+                idx.index_paths([out_dir])
+                self._update_index_stats()
+            except Exception as ex:
+                errors.append(f"index: {ex}")
+        msg = tr("batch_done", n=len(created), dir=out_dir)
+        if errors:
+            msg += "\n\n" + tr("export_errors") + "\n" + "\n".join(errors[:10])
+        QMessageBox.information(self, tr("export_done"), msg)
+        self._autosave_project()
 
     def create_text_log(self):
         last = self.settings.value("ui/last_dir", str(Path.home()))
@@ -876,10 +1240,20 @@ class MainWindow(QMainWindow):
         om = QMenu(self.btn_org)
         om.addAction(tr("project_new"), self.new_project)
         om.addAction(tr("project_open"), self.open_project)
+        recent = om.addMenu(tr("recent_projects"))
+        if self.recent_projects:
+            for rp in self.recent_projects[:8]:
+                recent.addAction(Path(rp).name, lambda p=rp: self.open_project_path(p))
+        else:
+            a = recent.addAction("—")
+            a.setEnabled(False)
         om.addAction(tr("project_save"), self.save_project)
+        om.addSeparator()
+        om.addAction(tr("batch_export_set"), self.batch_export_set)
         om.addSeparator()
         om.addAction(tr("new_category"), self.create_category)
         om.addAction(tr("assign_category"), self.assign_category_current)
+        om.addAction(tr("set_tags_current"), self.set_tags_current)
         om.addAction(tr("project_note_current"), self.set_note_current)
         om.addSeparator()
         om.addAction(tr("new_text_log"), self.create_text_log)
@@ -955,8 +1329,29 @@ class MainWindow(QMainWindow):
         self.chk_show_ext.setChecked(self.show_extensions)
         self.chk_show_ext.toggled.connect(self._toggle_extensions)
         cap_row.addWidget(self.chk_show_ext)
+        self.chk_show_diag = QCheckBox(tr("show_diagnostics"))
+        self.chk_show_diag.setToolTip(tr("show_diagnostics_tip"))
+        self.chk_show_diag.setChecked(self.show_diagnostics)
+        self.chk_show_diag.toggled.connect(self._toggle_diagnostics)
+        cap_row.addWidget(self.chk_show_diag)
         ll.addLayout(cap_row)
+
+        filter_form = QFormLayout()
+        self.cmb_filter_cat = QComboBox()
+        self.cmb_filter_cat.currentIndexChanged.connect(lambda *_: self._refresh_file_list())
+        self.cmb_filter_tag = QComboBox()
+        self.cmb_filter_tag.currentIndexChanged.connect(lambda *_: self._refresh_file_list())
+        self.ed_filter = QLineEdit()
+        self.ed_filter.setPlaceholderText(tr("filter_placeholder"))
+        self.ed_filter.textChanged.connect(lambda *_: self._refresh_file_list())
+        filter_form.addRow(tr("filter_category"), self.cmb_filter_cat)
+        filter_form.addRow(tr("filter_tag"), self.cmb_filter_tag)
+        filter_form.addRow(tr("filter_text"), self.ed_filter)
+        ll.addLayout(filter_form)
+        self._refresh_filter_controls()
+
         self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.file_list.currentRowChanged.connect(self._select_chat)
         ll.addWidget(self.file_list)
         b_clear = QPushButton(tr("clear_list"))
@@ -987,6 +1382,7 @@ class MainWindow(QMainWindow):
         self.scroll_lay.setSpacing(10)
         self.scroll_lay.addStretch(1)
         self.scroll.setWidget(self.scroll_host)
+        self.scroll.verticalScrollBar().valueChanged.connect(self._maybe_load_more_messages)
         self.tabs.addTab(self.scroll, tr("tab_clean"))
 
         # вкладка «Исходный JSON»
@@ -1250,31 +1646,85 @@ class MainWindow(QMainWindow):
         kind = "JSON" if chat.source_format == "json" else "TXT"
         return f"{kind} · {ext}"
 
+    def _refresh_filter_controls(self):
+        if not hasattr(self, "cmb_filter_cat"):
+            return
+        cur_cat = self.cmb_filter_cat.currentData()
+        cur_tag = self.cmb_filter_tag.currentData()
+        for cmb in (self.cmb_filter_cat, self.cmb_filter_tag):
+            cmb.blockSignals(True)
+            cmb.clear()
+        self.cmb_filter_cat.addItem(tr("all_categories"), "")
+        self.cmb_filter_cat.addItem(tr("uncategorized"), "__none__")
+        for c in sorted(self.categories):
+            self.cmb_filter_cat.addItem(c, c)
+        self.cmb_filter_tag.addItem(tr("all_tags"), "")
+        tags = sorted({t for vals in self.chat_tags.values() if isinstance(vals, list) for t in vals})
+        for t in tags:
+            self.cmb_filter_tag.addItem("#" + t, t)
+        for cmb, val in ((self.cmb_filter_cat, cur_cat), (self.cmb_filter_tag, cur_tag)):
+            i = cmb.findData(val)
+            cmb.setCurrentIndex(i if i >= 0 else 0)
+            cmb.blockSignals(False)
+
+    def _passes_filters(self, chat) -> bool:
+        cat_filter = self.cmb_filter_cat.currentData() if hasattr(self, "cmb_filter_cat") else ""
+        tag_filter = self.cmb_filter_tag.currentData() if hasattr(self, "cmb_filter_tag") else ""
+        text_filter = self.ed_filter.text().strip().lower() if hasattr(self, "ed_filter") else ""
+        cat = self._chat_category(chat)
+        if cat_filter == "__none__" and cat:
+            return False
+        if cat_filter and cat_filter != "__none__" and cat != cat_filter:
+            return False
+        if tag_filter and tag_filter not in self._chat_tags(chat):
+            return False
+        if text_filter:
+            hay = " ".join([chat.title, chat.path, chat.model, cat, " ".join(self._chat_tags(chat))]).lower()
+            if text_filter not in hay:
+                return False
+        return True
+
     def _add_list_item(self, chat: core.ChatLog):
         cat = self._chat_category(chat)
+        tags = self._chat_tags(chat)
         title = f"[{cat}] {chat.title}" if cat else chat.title
+        if tags:
+            title += "  " + " ".join("#" + t for t in tags[:4])
         extra = f" · {self._format_source_badge(chat)}" if self.show_extensions else ""
         item = QListWidgetItem(
             f"{title}\n   {chat.model or '—'} · "
             f"{len(chat.messages)} {tr('messages_short')}{extra}")
         item.setToolTip(chat.path)
+        item.setData(Qt.UserRole, chat.path)
         self.file_list.addItem(item)
 
     def _refresh_file_list(self, select_path: str = None):
+        if not hasattr(self, "file_list"):
+            return
         cur_path = select_path or (self.current.path if self.current else None)
+        self.file_list.blockSignals(True)
         self.file_list.clear()
         for chat in self.chats:
-            self._add_list_item(chat)
+            if self._passes_filters(chat):
+                self._add_list_item(chat)
+        self.file_list.blockSignals(False)
         if cur_path:
-            for i, c in enumerate(self.chats):
-                if c.path == cur_path:
-                    self.file_list.setCurrentRow(i)
+            for row in range(self.file_list.count()):
+                if self.file_list.item(row).data(Qt.UserRole) == cur_path:
+                    self.file_list.setCurrentRow(row)
                     break
+        elif self.file_list.count():
+            self.file_list.setCurrentRow(0)
 
     def _toggle_extensions(self, on):
         self.show_extensions = on
         self.settings.setValue("ui/show_extensions", "true" if on else "false")
         self._refresh_file_list()
+
+    def _toggle_diagnostics(self, on):
+        self.show_diagnostics = on
+        self.settings.setValue("ui/show_diagnostics", "true" if on else "false")
+        self._rebuild_view()
 
     def load_paths(self, paths, select_path: str = None):
         if not paths:
@@ -1299,18 +1749,15 @@ class MainWindow(QMainWindow):
                 errors.append(f"{Path(p).name}: {ex}")
                 continue
             self.chats.append(chat)
-            self._add_list_item(chat)
             loaded += 1
         if prog:
             prog.setValue(len(paths))
 
+        self._refresh_filter_controls()
         if select_path:
-            for i, c in enumerate(self.chats):
-                if c.path == select_path:
-                    self.file_list.setCurrentRow(i)
-                    break
+            self._refresh_file_list(select_path=select_path)
         elif loaded:
-            self.file_list.setCurrentRow(self.file_list.count() - 1)
+            self._refresh_file_list(select_path=self.chats[-1].path if self.chats else None)
 
         msg = tr("loaded_n", n=loaded)
         if errors:
@@ -1332,10 +1779,11 @@ class MainWindow(QMainWindow):
     # ---------- отображение ----------
 
     def _select_chat(self, row):
-        if row < 0 or row >= len(self.chats):
+        if row < 0 or row >= self.file_list.count():
             self.current = None
             return
-        self.current = self.chats[row]
+        path = self.file_list.item(row).data(Qt.UserRole)
+        self.current = next((c for c in self.chats if c.path == path), None)
         self._rebuild_view()
 
     def _clear_cards(self):
@@ -1357,9 +1805,17 @@ class MainWindow(QMainWindow):
         note = self._chat_note(chat)
         if cat:
             info.append(f"{tr('category_label')}: {_html.escape(cat)}")
+        tags = self._chat_tags(chat)
+        if tags:
+            info.append(f"{tr('tags_label')}: " + " ".join("#" + _html.escape(t) for t in tags))
         if note:
             short_note = note.replace("\n", " ")[:160]
             info.append(f"{tr('note_label')}: {_html.escape(short_note)}")
+        if self.show_diagnostics:
+            diag = f"{self._format_source_badge(chat)} · {chat.path}"
+            if self.chat_derived.get(chat.path):
+                diag += f" · derived_from={self.chat_derived.get(chat.path)}"
+            info.append(f"{tr('diagnostics_label')}: {_html.escape(diag)}")
         if chat.model:
             info.append(f"{tr('info_model')}: {_html.escape(chat.model)}")
         info.append(tr("info_msgs", n=len(chat.messages),
@@ -1428,8 +1884,13 @@ class MainWindow(QMainWindow):
                                model_name=chat.model)
             self.scroll_lay.insertWidget(self.scroll_lay.count() - 1, card)
         self._render_next = end
-        if end < len(chat.messages):
-            QTimer.singleShot(1, lambda g=generation: self._append_message_batch(g))
+
+    def _maybe_load_more_messages(self):
+        if self.current is None:
+            return
+        sb = self.scroll.verticalScrollBar()
+        if sb.maximum() - sb.value() < 900 and self._render_next < len(self.current.messages):
+            self._append_message_batch(self._render_generation)
 
     # ---------- копирование ----------
 
