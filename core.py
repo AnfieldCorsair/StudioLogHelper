@@ -268,21 +268,224 @@ def parse_data(data: dict, path: str = "") -> ChatLog:
     return chat
 
 
-def parse_file(path) -> ChatLog:
-    """Читает и парсит файл (расширение не важно — поддержки файлов без него)."""
+# ----------------------------------------------------------------------------
+# Парсинг текстовых логов (Arena AI / очищенные экспорты / простые диалоги)
+# ----------------------------------------------------------------------------
+
+DEFAULT_USER_HEADERS = (
+    "user", "пользователь", "human", "prompt", "request", "запрос",
+)
+DEFAULT_MODEL_HEADERS = (
+    "right ai", "right model", "model", "modelname", "assistant", "ai",
+    "answer", "response", "модель", "ассистент", "ответ",
+)
+
+
+@dataclass
+class TextParseOptions:
+    """Настройки разбора простых текстовых логов.
+
+    numbered_mode:
+      * alternating — строки вида #1:, #2: считаются чередованием user/model;
+      * model       — все #N: считаются ответами модели;
+      * user        — все #N: считаются запросами пользователя.
+    """
+    user_headers: list = field(default_factory=list)
+    model_headers: list = field(default_factory=list)
+    numbered_mode: str = "alternating"
+
+
+def _norm_header(s: str) -> str:
+    s = s.strip().strip(":").strip()
+    s = re.sub(r"\s+", " ", s).lower()
+    return s
+
+
+def _merged_headers(extra: list, defaults: tuple) -> set:
+    vals = set(defaults)
+    for x in extra or []:
+        nx = _norm_header(str(x))
+        if nx:
+            vals.add(nx)
+    return vals
+
+
+def looks_like_text_log_text(text: str) -> bool:
+    """Быстрая эвристика для Arena AI / очищенных текстовых экспортов."""
+    head = text[:20000]
+    if re.search(r"(?im)^\s*(Arena\s+Side-by-Side\s+Chat|User\s*:|Right\s+(AI|model)\s*:|Model(Name)?\s*:)", head):
+        return True
+    if len(re.findall(r"(?im)^\s*(User|Right\s+(AI|model)|Model(Name)?|Assistant)\s*$", head)) >= 2:
+        return True
+    if re.search(r"(?im)^\s*---\s*#?\d+\s+(.{0,40}?)(USER|ПОЛЬЗОВАТЕЛЬ|MODEL|МОДЕЛЬ|Assistant|AI|Ответ)", head):
+        return True
+    # Нумерованные блоки #1:, #2: — минимум два блока, иначе слишком рискованно.
+    return len(re.findall(r"(?m)^\s*#\d+\s*:", head)) >= 2
+
+
+def _role_from_header(header: str, opts: TextParseOptions) -> Optional[str]:
+    h = _norm_header(header)
+    uh = _merged_headers(opts.user_headers, DEFAULT_USER_HEADERS)
+    mh = _merged_headers(opts.model_headers, DEFAULT_MODEL_HEADERS)
+    if h in uh:
+        return "user"
+    if h in mh:
+        return "model"
+    # Частые варианты с названием модели: "Right Gemini", "Model GPT-4".
+    if h.startswith("right ") or h.startswith("model "):
+        return "model"
+    return None
+
+
+def _role_for_number(num: int, opts: TextParseOptions) -> str:
+    mode = (opts.numbered_mode or "alternating").lower()
+    if mode == "model":
+        return "model"
+    if mode == "user":
+        return "user"
+    return "user" if num % 2 == 1 else "model"
+
+
+def _flush_text_msg(chat: ChatLog, role: Optional[str], buf: list):
+    text = "\n".join(buf).strip("\n")
+    if role and text.strip():
+        chat.messages.append(Message(role=role, text=text))
+
+
+def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions] = None) -> ChatLog:
+    """Разбор plain-text логов: Arena AI, экспортов этой программы и простых диалогов.
+
+    Поддерживаемые блоки:
+      User: / Right AI: / Right model: / Model: / ModelName:
+      --- #1 USER ---- / ## #2 MODEL
+      #1: ... #2: ... (роль берётся из numbered_mode; по умолчанию чередование)
+    """
+    opts = options or TextParseOptions()
+    chat = ChatLog(path=path, title=Path(path).stem if path else tr("core_untitled"))
+    if re.search(r"(?im)^\s*Arena\s+Side-by-Side\s+Chat\s*$", text):
+        chat.model = "Arena AI"
+
+    role: Optional[str] = None
+    buf: list = []
+    saw_numbered = False
+
+    # Заголовки экспортов: "--- #2 gemini-2.5-pro ----" / "## #2 MODEL".
+    export_re = re.compile(
+        r"^\s*(?:---+|#{1,6})\s*#?(?P<num>\d+)?\s*(?P<label>[^\-#\n]{1,80}?)\s*(?:---+)?\s*$",
+        re.I,
+    )
+    numbered_re = re.compile(r"^\s*#(?P<num>\d+)\s*:\s*(?P<rest>.*)$")
+    plain_header_re = re.compile(r"^\s*(?P<header>[\wА-Яа-яЁё][\wА-Яа-яЁё ._-]{0,60})\s*:\s*(?P<rest>.*)$")
+
+    for line in text.splitlines():
+        # Игнорируем общий заголовок Arena.
+        if re.match(r"(?i)^\s*Arena\s+Side-by-Side\s+Chat\s*$", line):
+            continue
+
+        # В некоторых выгрузках роль стоит отдельной строкой без двоеточия:
+        # User / Right model / ModelName.
+        bare_norm = _norm_header(line)
+        bare_role = _role_from_header(line, opts)
+        safe_bare = {
+            "user", "пользователь", "human",
+            "right ai", "right model", "model", "modelname",
+            "assistant", "ai", "модель", "ассистент",
+        } | _merged_headers(opts.user_headers, ()) | _merged_headers(opts.model_headers, ())
+        if bare_role and bare_norm in safe_bare:
+            _flush_text_msg(chat, role, buf)
+            buf = []
+            role = bare_role
+            continue
+
+        m = numbered_re.match(line)
+        if m:
+            _flush_text_msg(chat, role, buf)
+            buf = []
+            n = int(m.group("num"))
+            saw_numbered = True
+            role = _role_for_number(n, opts)
+            rest = m.group("rest")
+            if rest:
+                buf.append(rest)
+            continue
+
+        m = export_re.match(line)
+        if m:
+            label = (m.group("label") or "").strip()
+            # Убираем номер, если он попал в label, и служебные скобки времени.
+            label = re.sub(r"^#?\d+\s*", "", label).strip()
+            label = re.sub(r"\[[^\]]+\]", "", label).strip()
+            detected = _role_from_header(label, opts)
+            # В очищенных экспортах подпись модели часто равна имени модели
+            # (например, "#2 Arena AI"), поэтому роль восстанавливаем по номеру.
+            if not detected and m.group("num"):
+                detected = _role_for_number(int(m.group("num")), opts)
+            if detected:
+                _flush_text_msg(chat, role, buf)
+                buf = []
+                role = detected
+                continue
+
+        m = plain_header_re.match(line)
+        if m:
+            # В шапках экспортов есть строки "  Модель: ..." — не считаем
+            # их началом сообщения, пока не встретили первый настоящий блок.
+            if role is None and line[:1].isspace():
+                continue
+            detected = _role_from_header(m.group("header"), opts)
+            if detected:
+                _flush_text_msg(chat, role, buf)
+                buf = []
+                role = detected
+                rest = m.group("rest")
+                if rest:
+                    buf.append(rest)
+                continue
+
+        # До первого распознанного блока пропускаем служебные строки.
+        if role is not None:
+            buf.append(line)
+
+    _flush_text_msg(chat, role, buf)
+
+    if saw_numbered and (opts.numbered_mode or "alternating") == "alternating":
+        chat.warnings.append(tr("core_warn_numbered_guess"))
+    if not chat.messages:
+        raise ParseError(tr("core_err_text_no_messages"))
+    return chat
+
+
+def parse_file(path, text_options: Optional[TextParseOptions] = None) -> ChatLog:
+    """Читает и парсит файл.
+
+    Сначала пробует JSON-лог Google AI Studio, затем plain-text логи Arena AI
+    и очищенные экспорты (TXT/MD) этой же программы.
+    """
     p = Path(path)
     raw_bytes = p.read_bytes()
     data = None
     last_err = None
+    text_candidates = []
     for enc in ("utf-8", "utf-8-sig", "utf-16", "cp1251"):
         try:
-            data = json.loads(raw_bytes.decode(enc))
+            decoded = raw_bytes.decode(enc)
+            text_candidates.append(decoded)
+            data = json.loads(decoded)
             break
-        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        except UnicodeDecodeError as e:
             last_err = e
-    if data is None:
-        raise ParseError(tr("core_err_json", err=last_err))
-    return parse_data(data, str(p))
+        except json.JSONDecodeError as e:
+            last_err = e
+    if data is not None:
+        return parse_data(data, str(p))
+
+    # JSON не прочитался — пробуем текстовые диалоги во всех кодировках,
+    # потому что plain-text UTF-16 может формально декодироваться как UTF-8
+    # с NUL-символами, но не распознаться эвристикой.
+    for decoded_text in text_candidates:
+        if looks_like_text_log_text(decoded_text):
+            return parse_text_log(decoded_text, str(p), text_options)
+    raise ParseError(tr("core_err_json", err=last_err))
 
 
 def looks_like_log(path) -> bool:
@@ -298,9 +501,11 @@ def looks_like_log(path) -> bool:
             head = fh.read(4096).decode("utf-8", errors="ignore").lstrip()
     except OSError:
         return False
-    return head.startswith("{") and (
+    if head.startswith("{") and (
         '"chunkedPrompt"' in head or '"runSettings"' in head or '"chunks"' in head
-    )
+    ):
+        return True
+    return looks_like_text_log_text(head)
 
 
 def scan_folder(folder, recursive: bool = True) -> list:

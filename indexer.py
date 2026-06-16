@@ -224,10 +224,12 @@ class SearchIndex:
                 return KIND_TXT
             if k == KIND_LOG and include_logs:
                 return KIND_LOG
-            if include_txt and is_text_file(f):
-                return KIND_TXT
+            # Сначала проверяем лог: Arena/очищенные экспорты часто имеют .txt,
+            # но их полезнее индексировать как диалог с ролями, а не как обычный текст.
             if include_logs and core.looks_like_log(f):
                 return KIND_LOG
+            if include_txt and is_text_file(f):
+                return KIND_TXT
             return None
 
         for raw in paths:

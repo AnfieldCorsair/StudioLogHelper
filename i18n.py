@@ -184,6 +184,20 @@ _RU = {
     "index_done": "Индексация завершена",
     "index_stats": "Индекс: {files} файлов, {msgs} записей, {mb:.1f} МБ",
 
+
+    # --- расширенные разделители текстовых логов ---
+    "sep_button": "⚙️ Разделители…",
+    "sep_title": "Расширенные разделители текстовых логов",
+    "sep_hint": "Для Arena AI и очищенных TXT/MD можно добавить свои заголовки ролей. Пишите по одному варианту на строку: например, Right Gemini, Bot, Вопрос, Ответ.",
+    "sep_user_headers": "Заголовки пользователя:",
+    "sep_model_headers": "Заголовки модели:",
+    "sep_numbered_mode": "Если блоки только #1:, #2:",
+    "sep_num_alternating": "Считать чередованием пользователь → модель",
+    "sep_num_model": "Считать все блоки ответами модели",
+    "sep_num_user": "Считать все блоки запросами пользователя",
+    "sep_save": "Сохранить",
+    "sep_saved": "Настройки разделителей сохранены. Новые файлы будут распознаны с ними.",
+
     # --- core: вложения ---
     "att_image": "Изображение",
     "att_document": "Документ",
@@ -205,6 +219,8 @@ _RU = {
     "core_warn_dangling": "В конце лога есть размышления без итогового "
                           "ответа модели.",
     "core_warn_empty": "Лог не содержит сообщений.",
+    "core_warn_numbered_guess": "Нумерованные блоки #1/#2 распознаны как чередование пользователь/модель. Если это только ответы или только запросы — поменяйте режим в расширенных разделителях.",
+    "core_err_text_no_messages": "Не удалось распознать текстовый лог: не найдены блоки User/Model/#N.",
 
     # --- core: экспорт ---
     "core_chat": "Чат",
@@ -346,6 +362,20 @@ _EN = {
     "index_done": "Indexing finished",
     "index_stats": "Index: {files} files, {msgs} records, {mb:.1f} MB",
 
+
+    # --- advanced text-log separators ---
+    "sep_button": "⚙️ Separators…",
+    "sep_title": "Advanced text-log separators",
+    "sep_hint": "For Arena AI and cleaned TXT/MD files you can add custom role headers. Put one variant per line, e.g. Right Gemini, Bot, Question, Answer.",
+    "sep_user_headers": "User headers:",
+    "sep_model_headers": "Model headers:",
+    "sep_numbered_mode": "For #1:, #2: blocks:",
+    "sep_num_alternating": "Treat as user → model alternation",
+    "sep_num_model": "Treat all blocks as model answers",
+    "sep_num_user": "Treat all blocks as user prompts",
+    "sep_save": "Save",
+    "sep_saved": "Separator settings saved. Newly opened files will use them.",
+
     # --- core: attachments ---
     "att_image": "Image",
     "att_document": "Document",
@@ -368,6 +398,8 @@ _EN = {
     "core_warn_dangling": "The log ends with thoughts that have no final "
                           "model answer.",
     "core_warn_empty": "The log contains no messages.",
+    "core_warn_numbered_guess": "Numbered #1/#2 blocks were parsed as user/model alternation. If they are only answers or only prompts, change the mode in advanced separators.",
+    "core_err_text_no_messages": "Could not parse the text log: no User/Model/#N blocks were found.",
 
     # --- core: export ---
     "core_chat": "Chat",

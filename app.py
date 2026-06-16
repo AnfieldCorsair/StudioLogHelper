@@ -10,17 +10,19 @@ from __future__ import annotations
 
 import json
 import sys
+import re
 import html as _html
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSettings, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QLabel, QPushButton, QToolButton, QMenu,
     QFileDialog, QMessageBox, QTabWidget, QPlainTextEdit, QScrollArea,
     QFrame, QDialog, QDialogButtonBox, QCheckBox, QComboBox, QGroupBox,
     QFormLayout, QLineEdit, QStatusBar, QSizePolicy, QProgressDialog,
+    QTextEdit,
 )
 
 import core
@@ -29,6 +31,7 @@ from i18n import tr
 
 APP_NAME = "AI Studio Log Parser"
 ORG = "ArenaTools"
+ASSET_DIR = Path(__file__).resolve().parent / "assets" / "icons"
 
 ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 70, 200, 10
 BASE_FONT_PT = 10.0
@@ -143,9 +146,110 @@ def build_stylesheet(t: dict, scale: float = 1.0) -> str:
     """
 
 
+
+
+# ----------------------------------------------------------------------------
+# Иконки с безопасным fallback на эмодзи/текст
+# ----------------------------------------------------------------------------
+
+def icon_file(name: str) -> Path:
+    return ASSET_DIR / name
+
+
+_ICON_CACHE = {}
+_PIXMAP_CACHE = {}
+
+
+def load_icon(name: str) -> QIcon:
+    if name in _ICON_CACHE:
+        return _ICON_CACHE[name]
+    p = icon_file(name)
+    ic = QIcon(str(p)) if p.exists() else QIcon()
+    _ICON_CACHE[name] = ic
+    return ic
+
+
+def load_pixmap(name: str, size: int = 18) -> QPixmap:
+    key = (name, size)
+    if key in _PIXMAP_CACHE:
+        return _PIXMAP_CACHE[key]
+    p = icon_file(name)
+    out = QPixmap()
+    if p.exists():
+        pix = QPixmap(str(p))
+        if not pix.isNull():
+            out = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    _PIXMAP_CACHE[key] = out
+    return out
+
+
+def strip_leading_emoji(text: str) -> str:
+    # Убираем только декоративный первый символ/кластер перед обычной подписью.
+    return re.sub(r"^[^\wА-Яа-яЁё]+\s*", "", text, count=1)
+
 # ----------------------------------------------------------------------------
 # Диалог настроек экспорта
 # ----------------------------------------------------------------------------
+
+
+class TextSeparatorsDialog(QDialog):
+    """Расширенные настройки распознавания текстовых логов Arena/экспортов."""
+
+    def __init__(self, parent, settings: QSettings):
+        super().__init__(parent)
+        self.setWindowTitle(tr("sep_title"))
+        self.setMinimumWidth(560)
+        self._s = settings
+
+        lay = QVBoxLayout(self)
+        hint = QLabel(tr("sep_hint"))
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        form = QFormLayout()
+        self.ed_user = QTextEdit()
+        self.ed_user.setAcceptRichText(False)
+        self.ed_user.setMinimumHeight(86)
+        self.ed_model = QTextEdit()
+        self.ed_model.setAcceptRichText(False)
+        self.ed_model.setMinimumHeight(86)
+        self.cmb_num = QComboBox()
+        self.cmb_num.addItem(tr("sep_num_alternating"), "alternating")
+        self.cmb_num.addItem(tr("sep_num_model"), "model")
+        self.cmb_num.addItem(tr("sep_num_user"), "user")
+        form.addRow(tr("sep_user_headers"), self.ed_user)
+        form.addRow(tr("sep_model_headers"), self.ed_model)
+        form.addRow(tr("sep_numbered_mode"), self.cmb_num)
+        lay.addLayout(form)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(tr("sep_save"))
+        bb.button(QDialogButtonBox.Cancel).setText(tr("cancel"))
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._load()
+
+    def _load(self):
+        self.ed_user.setPlainText(self._s.value("parse/user_headers", ""))
+        self.ed_model.setPlainText(self._s.value("parse/model_headers", ""))
+        mode = self._s.value("parse/numbered_mode", "alternating")
+        i = self.cmb_num.findData(mode)
+        self.cmb_num.setCurrentIndex(i if i >= 0 else 0)
+
+    def options(self) -> core.TextParseOptions:
+        def lines(txt):
+            return [x.strip() for x in txt.splitlines() if x.strip()]
+        opts = core.TextParseOptions(
+            user_headers=lines(self.ed_user.toPlainText()),
+            model_headers=lines(self.ed_model.toPlainText()),
+            numbered_mode=self.cmb_num.currentData(),
+        )
+        self._s.setValue("parse/user_headers", "\n".join(opts.user_headers))
+        self._s.setValue("parse/model_headers", "\n".join(opts.model_headers))
+        self._s.setValue("parse/numbered_mode", opts.numbered_mode)
+        return opts
 
 class ExportDialog(QDialog):
     def __init__(self, parent, settings: QSettings, batch_count: int = 1):
@@ -305,7 +409,15 @@ class MessageCard(QFrame):
         if msg.role not in ("user", "model"):
             who = msg.role.upper()
         color = theme["user"] if msg.is_user else theme["model"]
-        lbl = QLabel(f"<b style='color:{color}'>#{num} {_html.escape(who)}</b>")
+        pix = load_pixmap("user.png" if msg.is_user else "model.png", 18)
+        prefix = ""
+        if not pix.isNull():
+            il = QLabel()
+            il.setPixmap(pix)
+            hdr.addWidget(il)
+        else:
+            prefix = "👤 " if msg.is_user else "🤖 "
+        lbl = QLabel(f"<b style='color:{color}'>#{num} {prefix}{_html.escape(who)}</b>")
         lbl.setTextFormat(Qt.RichText)
         hdr.addWidget(lbl)
         if msg.time_str():
@@ -419,6 +531,10 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(640, 420)
         self.setAcceptDrops(True)
 
+        app_icon = load_icon("app_logo.png")
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+
         self.settings = QSettings(ORG, APP_NAME)
         self.theme_name = self.settings.value("ui/theme", "dark")
         self.render_md = self.settings.value("ui/render_md", "true") == "true"
@@ -429,6 +545,7 @@ class MainWindow(QMainWindow):
             self.zoom = 100
         self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, self.zoom))
         i18n.set_lang(self.settings.value("ui/lang", "ru"))
+        self.text_parse_options = self._load_text_parse_options()
 
         self.chats: list = []
         self.current: core.ChatLog | None = None
@@ -439,6 +556,30 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr("status_hint"))
 
     # ---------- UI ----------
+
+    def _load_text_parse_options(self) -> core.TextParseOptions:
+        def split_saved(v):
+            return [x.strip() for x in str(v or "").splitlines() if x.strip()]
+        return core.TextParseOptions(
+            user_headers=split_saved(self.settings.value("parse/user_headers", "")),
+            model_headers=split_saved(self.settings.value("parse/model_headers", "")),
+            numbered_mode=self.settings.value("parse/numbered_mode", "alternating"),
+        )
+
+    def _decorate_button(self, btn, icon_name: str, min_width: int = 0):
+        ic = load_icon(icon_name)
+        if not ic.isNull():
+            btn.setIcon(ic)
+            btn.setText(strip_leading_emoji(btn.text()))
+        if min_width:
+            btn.setMinimumWidth(min_width)
+        btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+
+    def open_text_separators(self):
+        dlg = TextSeparatorsDialog(self, self.settings)
+        if dlg.exec() == QDialog.Accepted:
+            self.text_parse_options = dlg.options()
+            self.statusBar().showMessage(tr("sep_saved"), 4000)
 
     def _build_ui(self):
         central = QWidget()
@@ -451,8 +592,10 @@ class MainWindow(QMainWindow):
         top.setSpacing(6)
         b_open = QPushButton(tr("open_files"))
         b_open.clicked.connect(self.open_files)
+        self._decorate_button(b_open, "search.png", 150)
         b_folder = QPushButton(tr("open_folder"))
         b_folder.clicked.connect(self.open_folder)
+        self._decorate_button(b_folder, "search.png", 155)
         top.addWidget(b_open)
         top.addWidget(b_folder)
 
@@ -465,15 +608,23 @@ class MainWindow(QMainWindow):
         m.addAction(tr("copy_answers"), lambda: self.copy_chat(core.COPY_ANSWERS))
         m.addAction(tr("copy_thoughts"), lambda: self.copy_chat(core.COPY_THOUGHTS))
         self.btn_copy.setMenu(m)
+        self._decorate_button(self.btn_copy, "export.png", 130)
         top.addWidget(self.btn_copy)
 
         self.btn_export = QPushButton(tr("export_current"))
         self.btn_export.setObjectName("accent")
         self.btn_export.clicked.connect(self.export_current)
+        self._decorate_button(self.btn_export, "export.png", 125)
         self.btn_export_all = QPushButton(tr("export_all"))
         self.btn_export_all.clicked.connect(self.export_all)
+        self._decorate_button(self.btn_export_all, "export.png", 135)
         top.addWidget(self.btn_export)
         top.addWidget(self.btn_export_all)
+
+        b_sep = QPushButton(tr("sep_button"))
+        b_sep.clicked.connect(self.open_text_separators)
+        self._decorate_button(b_sep, "search.png", 190)
+        top.addWidget(b_sep)
 
         top.addStretch(1)
 
@@ -623,6 +774,7 @@ class MainWindow(QMainWindow):
         b_search = QPushButton(tr("search_btn"))
         b_search.setObjectName("accent")
         b_search.clicked.connect(self.do_search)
+        self._decorate_button(b_search, "search.png", 90)
         row1.addWidget(b_search)
         v.addLayout(row1)
 
@@ -649,7 +801,7 @@ class MainWindow(QMainWindow):
 
     # ---------- темы / зум / язык ----------
 
-    def apply_theme(self):
+    def apply_theme(self, rebuild_view: bool = True):
         t = THEMES[self.theme_name]
         scale = self.zoom / 100.0
         self.setStyleSheet(build_stylesheet(t, scale))
@@ -657,13 +809,14 @@ class MainWindow(QMainWindow):
         f.setPointSizeF(BASE_FONT_PT * scale)
         QApplication.instance().setFont(f)
         self.btn_theme.setText("🌙" if self.theme_name == "dark" else "☀️")
-        self._rebuild_view()
+        if rebuild_view:
+            self._rebuild_view()
         self._update_index_stats()
 
     def toggle_theme(self):
         self.theme_name = "light" if self.theme_name == "dark" else "dark"
         self.settings.setValue("ui/theme", self.theme_name)
-        self.apply_theme()
+        self.apply_theme(rebuild_view=True)
 
     def set_zoom(self, z: int):
         z = max(ZOOM_MIN, min(ZOOM_MAX, z))
@@ -671,7 +824,10 @@ class MainWindow(QMainWindow):
             return
         self.zoom = z
         self.settings.setValue("ui/zoom", z)
-        self.apply_theme()
+        # Важно: не пересоздаём карточки при каждом изменении масштаба.
+        # Qt сам перерасчитает размеры по новому QSS/шрифту; это убирает лаги
+        # на больших логах.
+        self.apply_theme(rebuild_view=False)
         self.statusBar().showMessage(f"Zoom: {z}%", 2000)
 
     def _change_lang(self):
@@ -770,7 +926,7 @@ class MainWindow(QMainWindow):
             if p in existing:
                 continue
             try:
-                chat = core.parse_file(p)
+                chat = core.parse_file(p, self.text_parse_options)
             except (core.ParseError, OSError, ValueError) as ex:
                 errors.append(f"{Path(p).name}: {ex}")
                 continue
@@ -956,8 +1112,11 @@ class MainWindow(QMainWindow):
     def _update_index_stats(self):
         if not hasattr(self, "lbl_index_stats"):
             return
+        if self._index is None:
+            self.lbl_index_stats.setText("")
+            return
         try:
-            st = self._get_index().stats()
+            st = self._index.stats()
             self.lbl_index_stats.setText(
                 tr("index_stats", files=st["files"], msgs=st["messages"],
                    mb=st["db_size"] / 1e6))
@@ -1066,6 +1225,9 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    ic = load_icon("app_logo.png")
+    if not ic.isNull():
+        app.setWindowIcon(ic)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG)
     f = app.font()
