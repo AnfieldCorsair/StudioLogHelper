@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import core
+from studiologhelper.core.parsers.text_parser import parse_text_log
 
 
 def test_exported_message_with_markdown_headings_and_rules_not_split():
@@ -31,7 +31,7 @@ print("--- Обработка файла: x ---")
 console.log(`ID Чата: ${data.chat_id}`);
 ```
 '''
-    chat = core.parse_text_log(text, "clean.txt")
+    chat = parse_text_log(text, "clean.txt")
     assert len(chat.messages) == 1
     assert chat.messages[0].role == "model"
     assert "#### 1. Python" in chat.messages[0].text

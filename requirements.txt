@@ -1,3 +1,8 @@
-PySide6>=6.6
-# Optional: improves Markdown rendering in exports/preview. The app falls back to its built-in renderer if absent.
+PyQt6>=6.6
+# Optional but recommended for 3-5x faster JSON parsing
+orjson>=3.9
+# Optional: better markdown rendering (C extension)
 markdown>=3.6
+# For tests
+pytest>=8
+pytest-qt>=4.4
