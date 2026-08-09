@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -116,7 +116,7 @@ def chat_to_clipboard_text(chat: ChatLog, which: str = COPY_ALL, opts=None) -> s
         opts = ExportOptions(fmt="txt", metadata=False, system_instruction=False)
 
     if which == COPY_ALL:
-        o = ExportOptions(**{**opts.__dict__, "fmt": "txt", "content": CONTENT_ALL})
+        o = replace(opts, fmt="txt", content=CONTENT_ALL)
         exporter = TxtExporter()
         main, _ = exporter.export(chat, o)
         return main

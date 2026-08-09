@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from .base import CONTENT_THOUGHTS, THOUGHTS_EXCLUDE, THOUGHTS_SEPARATE
 from .txt import _iter_export_messages
@@ -76,7 +77,7 @@ class JsonExporter:
     def export(self, chat, opts):
         sep_doc = None
         if opts.content != CONTENT_THOUGHTS and opts.thoughts == THOUGHTS_SEPARATE:
-            main_opts = type(opts)(**{**opts.__dict__, "thoughts": THOUGHTS_EXCLUDE})
+            main_opts = replace(opts, thoughts=THOUGHTS_EXCLUDE)
             doc = _json_doc(chat, main_opts)
             th_msgs = [
                 {"index": n, "role": m.role, "thoughts": [t.strip() for t in m.thoughts]}

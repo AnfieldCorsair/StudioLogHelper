@@ -58,9 +58,9 @@
 ## Установка и запуск
 
 ```bash
-pip install PySide6
-python app.py                # GUI
-python app.py файл папка     # сразу с файлами
+pip install -r requirements.txt
+python -m studiologhelper.ui.app                # GUI
+python app.py                                    # GUI (compat)
 ```
 
 ## CLI
@@ -84,12 +84,10 @@ python cli.py stats                                       # размер инд�
 
 | Файл         | Назначение                                              |
 |--------------|---------------------------------------------------------|
-| `core.py`    | Ядро: парсинг, экспортёры TXT/HTML/MD, Markdown-рендер. Без зависимостей. |
-| `indexer.py` | Поисковый индекс SQLite FTS5 (инкрементальный)          |
-| `i18n.py`    | Локализация RU/EN                                       |
-| `app.py`     | GUI на PySide6                                          |
-| `cli.py`     | Консольная утилита (export / index / search / stats)    |
-| `assets/icons/` | Кастомные PNG-иконки приложения и карточек; если файла нет, GUI безопасно показывает эмодзи/текст |
+| `studiologhelper/` | Пакет: парсеры, экспортёры, модели, индекс, UI (`PyQt6`) |
+| `cli.py`     | CLI-утилита (export / index / search / stats)             |
+| `assets/icons/` | Кастомные PNG-иконки; безопасный fallback на эмодзи/текст |
+| `tests/`     | Тесты регрессии                                          |
 
 ## Формат лога AI Studio (кратко)
 

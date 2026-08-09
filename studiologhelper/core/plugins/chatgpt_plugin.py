@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""ChatGPT export parser"""
+"""ChatGPT export parser
+
+ПРИМЕЧАНИЕ: функционал не тестировался в продакшене. Это заглушка для будущих версий.
+"""
 
 from pathlib import Path
 import json

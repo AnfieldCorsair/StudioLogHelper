@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Claude / Anthropic export parser plugin example"""
+"""Claude / Anthropic export parser plugin example
+
+ПРИМЕЧАНИЕ: функционал не тестировался в продакшене. Это заглушка для будущих версий.
+"""
 
 from pathlib import Path
 import json

@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import html as _html
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -1163,8 +1163,7 @@ def export_json(chat: ChatLog, opts: ExportOptions):
     """
     sep_doc = None
     if opts.content != CONTENT_THOUGHTS and opts.thoughts == THOUGHTS_SEPARATE:
-        main_opts = ExportOptions(**{**opts.__dict__,
-                                     "thoughts": THOUGHTS_EXCLUDE})
+        main_opts = replace(opts, thoughts=THOUGHTS_EXCLUDE)
         doc = _json_doc(chat, main_opts)
         th_msgs = [{"index": n, "role": m.role,
                     "thoughts": [t.strip() for t in m.thoughts]}
@@ -1253,8 +1252,7 @@ def chat_to_clipboard_text(chat: ChatLog, which: str = COPY_ALL,
     opts = opts or ExportOptions(fmt="txt", metadata=False,
                                  system_instruction=False)
     if which == COPY_ALL:
-        o = ExportOptions(**{**opts.__dict__, "fmt": "txt",
-                             "content": CONTENT_ALL})
+        o = replace(opts, fmt="txt", content=CONTENT_ALL)
         return export_txt(chat, o)[0]
 
     labels = effective_labels(chat, opts)

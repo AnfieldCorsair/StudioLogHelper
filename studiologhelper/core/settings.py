@@ -19,7 +19,7 @@ except ImportError:
                 setattr(self, k, v)
 
         def model_dump(self):
-            return self.__dict__
+            return getattr(self, '__dict__', vars(self))
 
         @classmethod
         def model_validate(cls, data):
@@ -144,11 +144,11 @@ else:
         def model_dump(self):
             return {
                 "version": self.version,
-                "ui": self.ui.__dict__ if hasattr(self.ui, '__dict__') else {},
-                "parser": self.parser.__dict__,
-                "export": self.export.__dict__,
-                "copy": self.copy.__dict__,
-                "index": self.index.__dict__,
+                "ui": self.ui.model_dump() if hasattr(self.ui, 'model_dump') else (self.ui.__dict__ if hasattr(self.ui, '__dict__') else {}),
+                "parser": self.parser.model_dump() if hasattr(self.parser, 'model_dump') else (self.parser.__dict__ if hasattr(self.parser, '__dict__') else {}),
+                "export": self.export.model_dump() if hasattr(self.export, 'model_dump') else (self.export.__dict__ if hasattr(self.export, '__dict__') else {}),
+                "copy": self.copy.model_dump() if hasattr(self.copy, 'model_dump') else (self.copy.__dict__ if hasattr(self.copy, '__dict__') else {}),
+                "index": self.index.model_dump() if hasattr(self.index, 'model_dump') else (self.index.__dict__ if hasattr(self.index, '__dict__') else {}),
                 "recent_projects": self.recent_projects,
                 "project_name": self.project_name,
                 "project_path": self.project_path,

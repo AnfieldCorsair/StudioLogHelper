@@ -85,7 +85,7 @@ The global index uses SQLite FTS5.
 
 ```bash
 pip install -r requirements.txt
-python app.py
+python -m studiologhelper.ui.app
 ```
 
 ## CLI examples
@@ -103,20 +103,15 @@ python cli.py search "cow aerodynamics" --in answers
 
 | File | Purpose |
 |---|---|
-| `core.py` | Parser and exporters, no GUI dependency |
-| `app.py` | PySide6 desktop GUI |
-| `cli.py` | Command line interface |
-| `indexer.py` | SQLite FTS5 search index |
-| `i18n.py` | RU/EN localization |
-| `assets/icons/` | Custom UI icons with safe fallback |
-| `docs/` | Config, release audit and license notes |
-| `tests/` | Core/parser regression tests |
-| `docs/CONFIG.md` | Project config documentation in Russian |
-| `docs/CONFIG.en.md` | Project config documentation in English |
+| `studiologhelper/` | Package: parsers, exporters, models, indexer, UI (`PyQt6`) |
+| `cli.py` | CLI utility |
+| `assets/icons/` | Custom icons with safe fallback |
+| `tests/` | Regression tests |
 
 ## Tests
 
 ```bash
 python -m pytest -q tests
-python -m py_compile app.py core.py cli.py i18n.py indexer.py
+python -m py_compile app.py cli.py
+python -c "from studiologhelper.core.exporters.base import ExportOptions; print('OK')"
 ```
