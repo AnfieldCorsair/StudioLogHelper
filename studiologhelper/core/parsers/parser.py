@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Top-level parse_file с оптимизациями."""
+"""Top-level parse_file с оптимизациями + плагины + streaming."""
 
 from __future__ import annotations
 
@@ -12,12 +12,28 @@ from .detector import _looks_like_text_log_head
 from .json_parser import _json_loads, parse_data
 from .text_parser import parse_text_log
 from ...utils.encoding import detect_encoding_and_decode
+from ...utils.logger import get_logger
+
+logger = get_logger()
 
 
-def parse_file(path, text_options: Optional[TextParseOptions] = None):
-    """Читает и парсит файл, оптимизированный путь для TXT vs JSON."""
+def parse_file(path, text_options: Optional[TextParseOptions] = None, use_plugins: bool = True, use_streaming: bool = True):
+    """Читает и парсит файл, оптимизированный путь для TXT vs JSON + плагины + streaming."""
     p = Path(path)
     try:
+        # Если большой файл и ijson установлен — используем стриминг сразу, не читая весь файл в RAM
+        if use_streaming:
+            try:
+                from .streaming_json_parser import should_use_streaming, parse_large_json_streaming
+
+                if should_use_streaming(p):
+                    logger.info(f"Using streaming parser for large file {p} ({p.stat().st_size / 1024 / 1024:.1f} MB)")
+                    return parse_large_json_streaming(p)
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning(f"Streaming parser failed for {p}, fallback to normal: {e}")
+
         data_bytes = p.read_bytes()
     except OSError as e:
         raise ParseError(f"Cannot read file: {e}") from e
@@ -25,13 +41,26 @@ def parse_file(path, text_options: Optional[TextParseOptions] = None):
     suffix = p.suffix.lower()
     text_candidates: list[str] = []
 
-    # Одно декодирование, а не 4
     try:
         decoded_once = detect_encoding_and_decode(data_bytes)
         text_candidates.append(decoded_once)
     except Exception:
-        # fallback: try raw bytes decode via json loader
         pass
+
+    # Попытка через плагины (Claude, ChatGPT, etc.) — быстро по head
+    if use_plugins and text_candidates:
+        try:
+            from ..plugins import get_global_registry
+
+            head = text_candidates[0][:8192]
+            registry = get_global_registry()
+            # Сначала ищем плагин по head
+            plugin_result = registry.parse_with_plugin(p, head, text_options)
+            if plugin_result:
+                logger.info(f"Parsed {p} with plugin")
+                return plugin_result
+        except Exception as e:
+            logger.debug(f"Plugin parsing failed for {p}: {e}")
 
     # Fast path для явных текстовых файлов / не-JSON
     for decoded_text in text_candidates:
@@ -43,15 +72,11 @@ def parse_file(path, text_options: Optional[TextParseOptions] = None):
             if _looks_like_text_log_head(decoded_text[:20000]):
                 return parse_text_log(decoded_text, str(p), text_options)
             if not looks_jsonish:
-                # обычный текст, но не диалоговый лог — не падать в JSON парсер
-                # Если suffix явно txt и текст большой — бросаем ошибку текста
                 if suffix in {".txt", ".md"}:
-                    # попытаться как текст лог все равно
                     try:
                         return parse_text_log(decoded_text, str(p), text_options)
                     except ParseError:
                         pass
-                # Если это не JSON — не пробуем JSON
                 if not looks_jsonish:
                     break
 
