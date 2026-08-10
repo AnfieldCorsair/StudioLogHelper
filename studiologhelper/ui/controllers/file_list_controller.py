@@ -34,6 +34,7 @@ except ImportError:
         return _Signal()
 
 from ...core.models import ChatLog
+from ...core.project import matches_hierarchical_category
 from ...utils.logger import get_logger
 from .project_controller import ProjectController
 
@@ -41,7 +42,7 @@ logger = get_logger()
 
 
 class FileListController(QObject):
-    """Контроллер загруженных файлов логов, фильтрации и навигации."""
+    """Контроллер загруженных файлов логов, иерархической фильтрации и навигации."""
 
     chatsChanged = pyqtSignal()
     currentChanged = pyqtSignal(object)  # ChatLog | None
@@ -64,6 +65,7 @@ class FileListController(QObject):
         if not chat or any(c.path == chat.path for c in self.chats):
             return False
         self.chats.append(chat)
+        self.project_controller.set_active_chats_ref(self.chats)
         self.chatsChanged.emit()
         return True
 
@@ -76,11 +78,13 @@ class FileListController(QObject):
                 existing.add(c.path)
                 added += 1
         if added:
+            self.project_controller.set_active_chats_ref(self.chats)
             self.chatsChanged.emit()
         return added
 
     def remove_chat(self, path: str):
         self.chats = [c for c in self.chats if c.path != path]
+        self.project_controller.set_active_chats_ref(self.chats)
         if self.current and self.current.path == path:
             self.current = self.chats[0] if self.chats else None
             self.currentChanged.emit(self.current)
@@ -89,6 +93,7 @@ class FileListController(QObject):
     def clear(self):
         self.chats.clear()
         self.current = None
+        self.project_controller.set_active_chats_ref(self.chats)
         self.chatsChanged.emit()
         self.currentChanged.emit(None)
         logger.info("FileListController cleared")
@@ -119,12 +124,13 @@ class FileListController(QObject):
         cat = self.project_controller.get_category(chat)
         tags = self.project_controller.get_tags(chat)
 
-        if self.category_filter == "__none__" and cat:
-            return False
-        if self.category_filter and self.category_filter != "__none__" and cat != self.category_filter:
-            return False
+        if self.category_filter:
+            if not matches_hierarchical_category(cat, self.category_filter):
+                return False
+
         if self.tag_filter and self.tag_filter not in tags:
             return False
+
         if self.text_filter:
             q = self.text_filter.strip().lower()
             haystack = f"{chat.title} {chat.path} {chat.model} {cat} {' '.join(tags)}".lower()
@@ -137,7 +143,7 @@ class FileListController(QObject):
 
     def format_badge(self, chat: ChatLog, tr_func: Optional[Callable] = None) -> str:
         p = Path(chat.path) if chat.path else Path("")
-        no_ext = (tr_func("no_extension") if tr_func else "no ext")
+        no_ext = tr_func("no_extension") if tr_func else "no ext"
         ext = p.suffix.lower().lstrip(".") or no_ext
         kind = "JSON" if chat.source_format == "json" else "TXT"
         return f"{kind} · {ext}"

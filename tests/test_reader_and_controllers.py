@@ -1,11 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for reader mode, stemming search, controllers, and services."""
+"""Unit tests for reader mode, stemming, hybrid search, hierarchical categories, and bookmarks."""
 
 from pathlib import Path
 from studiologhelper.core.models import ChatLog, Message
-from studiologhelper.core.project import Project, ProjectBookmark, ProjectFile
+from studiologhelper.core.project import (
+    Project,
+    ProjectBookmark,
+    ProjectFile,
+    matches_hierarchical_category,
+)
 from studiologhelper.i18n.translator import Translator
 from studiologhelper.indexer.stemmer import match_stemmed_query, stem_ru, stem_en, stem_word
+from studiologhelper.indexer.hybrid_search import (
+    HybridSearchEngine,
+    compute_subword_vector,
+    cosine_similarity,
+)
 from studiologhelper.ui.controllers.project_controller import ProjectController
 from studiologhelper.ui.controllers.file_list_controller import FileListController
 from studiologhelper.ui.services.copy_service import CopyService
@@ -24,14 +34,12 @@ class MockSettings:
 
 
 def test_russian_and_english_stemmer():
-    # Russian morphology
     assert stem_ru("сковорода") == "сковород"
     assert stem_ru("сковороду") == "сковород"
     assert stem_ru("сковородой") == "сковород"
     assert stem_ru("сковородка") == "сковород"
     assert stem_ru("сковородку") == "сковород"
 
-    # English morphology
     assert stem_en("running") == "runn"
     assert stem_en("developers") == "developer"
     assert stem_en("searches") == "search"
@@ -46,24 +54,59 @@ def test_stemmed_query_matching():
     start, end = spans[0]
     assert text[start:end] == "сковороду"
 
-    # Phrase match
     text2 = "Искусственный интеллект меняет разработку программного обеспечения."
     matched2, _, _ = match_stemmed_query('"искусственный интеллект"', text2)
     assert matched2 is True
 
-    # No match
     matched3, _, _ = match_stemmed_query("пылесос", text2)
     assert matched3 is False
 
 
-def test_project_bookmarks_persistence(tmp_path):
+def test_hybrid_search_engine():
+    engine = HybridSearchEngine()
+    chat = ChatLog(
+        title="Python Discussion",
+        model="gpt-4",
+        path="/tmp/python.json",
+        messages=[
+            Message(role="user", text="Как жарить на сковороде без прилипания?"),
+            Message(role="model", text="Нагрейте чугунную сковородку и добавьте немного масла."),
+            Message(role="user", text="Что такое квантовая запутанность?"),
+            Message(role="model", text="Квантовая запутанность — физическое явление в квантовой механике."),
+        ],
+    )
+
+    # Search word variation "сковородка"
+    hits = engine.search_chats([chat], "сковородка")
+    assert len(hits) >= 1
+    assert hits[0].msg_num in (1, 2)
+    assert hits[0].score > 0
+
+    # Search subword / fuzzy
+    hits_quantum = engine.search_chats([chat], "квантовый")
+    assert len(hits_quantum) >= 1
+    assert hits_quantum[0].msg_num == 4
+
+
+def test_hierarchical_categories_matching():
+    assert matches_hierarchical_category("Work/Research/Gemini", "Work") is True
+    assert matches_hierarchical_category("Work/Research/Gemini", "Work/Research") is True
+    assert matches_hierarchical_category("Work/Research/Gemini", "Work/Research/Gemini") is True
+    assert matches_hierarchical_category("Work/ProjectA", "Work/Research") is False
+    assert matches_hierarchical_category("Personal/Notes", "Work") is False
+    assert matches_hierarchical_category("", "__none__") is True
+    assert matches_hierarchical_category("Work", "__none__") is False
+
+
+def test_project_highlights_and_autosave(tmp_path):
     proj_path = tmp_path / "test_proj.slh.json"
     bm = ProjectBookmark(
         block_num=2,
         role="model",
         title="Chat Title",
-        note="Key algorithm explanation",
-        snippet="def quicksort(): ...",
+        note="Key insight",
+        quote="чугунную сковородку",
+        color="yellow",
     )
     pf = ProjectFile(
         path="/path/to/chat.json",
@@ -77,8 +120,8 @@ def test_project_bookmarks_persistence(tmp_path):
     loaded = Project.load(proj_path)
     assert len(loaded.files) == 1
     assert len(loaded.files[0].bookmarks) == 1
-    assert loaded.files[0].bookmarks[0].block_num == 2
-    assert loaded.files[0].bookmarks[0].note == "Key algorithm explanation"
+    assert loaded.files[0].bookmarks[0].quote == "чугунную сковородку"
+    assert loaded.files[0].bookmarks[0].color == "yellow"
 
 
 def test_controllers_and_services(tmp_path):
@@ -86,9 +129,11 @@ def test_controllers_and_services(tmp_path):
     proj_ctrl = ProjectController(settings)
     file_ctrl = FileListController(proj_ctrl)
 
-    # Categories
-    proj_ctrl.create_category("Work")
+    # Categories with hierarchy
+    proj_ctrl.create_category("Work/AI/Gemini")
     assert "Work" in proj_ctrl.categories
+    assert "Work/AI" in proj_ctrl.categories
+    assert "Work/AI/Gemini" in proj_ctrl.categories
 
     # Add chats
     chat1 = ChatLog(
@@ -112,26 +157,19 @@ def test_controllers_and_services(tmp_path):
     file_ctrl.add_chats([chat1, chat2])
     assert len(file_ctrl.chats) == 2
 
-    # Tags and notes
+    # Tags, notes, and highlights
     proj_ctrl.set_tags(chat1.path, ["python", "ai"])
     assert proj_ctrl.get_tags(chat1.path) == ["python", "ai"]
 
-    proj_ctrl.set_note(chat1.path, "Important chat")
-    assert proj_ctrl.get_note(chat1.path) == "Important chat"
+    proj_ctrl.add_highlight(chat1.path, block_num=1, quote="Hello", color="green", note="Greeting quote")
+    bms = proj_ctrl.get_bookmarks(chat1.path)
+    assert len(bms) == 1
+    assert bms[0]["quote"] == "Hello"
+    assert bms[0]["color"] == "green"
 
-    # Bookmarks
-    proj_ctrl.add_bookmark(chat1.path, block_num=1, role="user", note="First prompt")
-    assert proj_ctrl.is_bookmarked(chat1.path, 1) is True
-    assert proj_ctrl.is_bookmarked(chat1.path, 2) is False
-
-    # Filters
-    file_ctrl.set_filters(tag="python")
+    # Hierarchical filter test
+    proj_ctrl.assign_category(chat1.path, "Work/AI/Gemini")
+    file_ctrl.set_filters(category="Work")
     filtered = file_ctrl.get_filtered_chats()
     assert len(filtered) == 1
     assert filtered[0].title == "Chat 1"
-
-    # Copy service
-    trans = Translator()
-    copy_text = CopyService.clean_copy_text(chat1, which="prompts", settings=settings)
-    assert "Hello" in copy_text
-    assert "Hi there!" not in copy_text

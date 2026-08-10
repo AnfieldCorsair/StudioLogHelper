@@ -4,8 +4,10 @@
 Оптимизации:
   - Ленивая отрисовка вкладок (рендерится ТОЛЬКО активная вкладка, 0ms лагов при переключении галочек)
   - Аппаратная виртуализация для 10k+ сообщений
-  - Плавное масштабирование без пересоздания виджетов
-  - Полная изоляция бизнес-логики в контроллеры и сервисы
+  - Гибридный поиск (FTS5 + Стемминг + Локальные эмбеддинги)
+  - Иерархические категории (Work/Research/Gemini)
+  - Автосохранение проектов .slh.json
+  - Адаптивное масштабирование кнопок и шрифтов
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ from ..core.exporters.base import CONTENT_ALL, CONTENT_ANSWERS, CONTENT_PROMPTS,
 from ..core.models import COPY_ALL, COPY_ANSWERS, COPY_PROMPTS, COPY_THOUGHTS, ChatLog, Message
 from ..core.parsers.base import TextParseOptions
 from ..i18n.translator import DEFAULT_LANG, LANGS, Translator
-from ..indexer import SearchIndex
+from ..indexer import HybridSearchEngine, SearchIndex
 from ..indexer.memory_search import fast_search_chats
 from ..utils.logger import get_logger, setup_logger
 from ..utils.paths import reveal_in_file_manager
@@ -100,7 +102,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_NAME + " 2.0 (PyQt6 + Book Reader)")
         self.resize(1340, 860)
-        self.setMinimumSize(800, 500)
+        self.setMinimumSize(820, 520)
         self.setAcceptDrops(True)
 
         self.settings = QSettings(ORG, APP_NAME)
@@ -110,6 +112,7 @@ class MainWindow(QMainWindow):
         # Controllers
         self.project_ctrl = ProjectController(self.settings, self.undo_manager)
         self.file_ctrl = FileListController(self.project_ctrl)
+        self.hybrid_engine = HybridSearchEngine()
 
         # UI State & Preferences
         self.theme_name = self.settings.value("ui/theme", "dark")
@@ -179,8 +182,6 @@ class MainWindow(QMainWindow):
         btn.setToolTip(btn.toolTip() or compact)
         if hasattr(btn, "setToolButtonStyle"):
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        if min_w:
-            btn.setMinimumWidth(min_w)
         btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
 
     # ---- UI Construction ----
@@ -196,10 +197,10 @@ class MainWindow(QMainWindow):
 
         b_open = QPushButton(self.tr("open_files"))
         b_open.clicked.connect(self.open_files)
-        self._decorate(b_open, "search.png", 130)
+        self._decorate(b_open, "search.png")
         b_folder = QPushButton(self.tr("open_folder"))
         b_folder.clicked.connect(self.open_folder)
-        self._decorate(b_folder, "search.png", 135)
+        self._decorate(b_folder, "search.png")
         top1.addWidget(b_open)
         top1.addWidget(b_folder)
 
@@ -214,22 +215,22 @@ class MainWindow(QMainWindow):
         m_copy.addSeparator()
         m_copy.addAction(self.tr("copy_settings"), self.open_copy_settings)
         self.btn_copy.setMenu(m_copy)
-        self._decorate(self.btn_copy, "export.png", 115)
+        self._decorate(self.btn_copy, "export.png")
         top1.addWidget(self.btn_copy)
 
         self.btn_export = QPushButton(self.tr("export_current"))
         self.btn_export.setObjectName("accent")
         self.btn_export.clicked.connect(self.export_current)
-        self._decorate(self.btn_export, "export.png", 115)
+        self._decorate(self.btn_export, "export.png")
         self.btn_export_all = QPushButton(self.tr("export_all"))
         self.btn_export_all.clicked.connect(self.export_all)
-        self._decorate(self.btn_export_all, "export.png", 165)
+        self._decorate(self.btn_export_all, "export.png")
         top1.addWidget(self.btn_export)
         top1.addWidget(self.btn_export_all)
 
         b_sep = QPushButton(self.tr("sep_button"))
         b_sep.clicked.connect(self.open_text_separators)
-        self._decorate(b_sep, "search.png", 135)
+        self._decorate(b_sep, "search.png")
         top1.addWidget(b_sep)
 
         # Organize / Project Menu
@@ -241,7 +242,7 @@ class MainWindow(QMainWindow):
         om.addAction(self.tr("assign_category"), self.assign_category_current)
         om.addAction(self.tr("set_tags_current"), self.set_tags_current)
         om.addAction(self.tr("project_note_current"), self.set_note_current)
-        om.addAction(self.tr("reader_bookmarks"), self.open_bookmarks_dialog)
+        om.addAction(self.tr("reader_bookmarks") + " и Цитаты", self.open_bookmarks_dialog)
         om.addAction(self.tr("reveal_current_file"), self.reveal_current_file)
         om.addSeparator()
         om.addAction(self.tr("project_new"), self.new_project)
@@ -252,7 +253,7 @@ class MainWindow(QMainWindow):
         om.addAction("Undo (Ctrl+Z)", self.undo)
         om.addAction("Redo (Ctrl+Y)", self.redo)
         self.btn_org.setMenu(om)
-        self._decorate(self.btn_org, "export.png", 150)
+        self._decorate(self.btn_org, "export.png")
         top1.addWidget(self.btn_org)
 
         top1.addStretch(1)
@@ -290,13 +291,13 @@ class MainWindow(QMainWindow):
         top2.addWidget(self.btn_collapse)
 
         b_zout = QPushButton("A−")
-        b_zout.setFixedWidth(34)
+        b_zout.setMinimumWidth(28)
         b_zout.clicked.connect(lambda: self.set_zoom(self.zoom - ZOOM_STEP))
         b_zin = QPushButton("A+")
-        b_zin.setFixedWidth(34)
+        b_zin.setMinimumWidth(28)
         b_zin.clicked.connect(lambda: self.set_zoom(self.zoom + ZOOM_STEP))
         self.lbl_zoom = QLabel(f"{self.zoom}%")
-        self.lbl_zoom.setMinimumWidth(38)
+        self.lbl_zoom.setMinimumWidth(36)
         self.lbl_zoom.setAlignment(Qt.AlignmentFlag.AlignCenter)
         top2.addWidget(b_zout)
         top2.addWidget(self.lbl_zoom)
@@ -310,7 +311,7 @@ class MainWindow(QMainWindow):
         top2.addWidget(self.cmb_lang)
 
         self.btn_theme = QPushButton("🌙" if self.theme_name == "dark" else "☀️")
-        self.btn_theme.setFixedWidth(38)
+        self.btn_theme.setMinimumWidth(32)
         self.btn_theme.clicked.connect(self.toggle_theme)
         top2.addWidget(self.btn_theme)
         root.addLayout(top2)
@@ -442,13 +443,13 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(w)
         row1 = QHBoxLayout()
         self.ed_query = QLineEdit()
-        self.ed_query.setPlaceholderText(self.tr("search_placeholder"))
+        self.ed_query.setPlaceholderText("Гибридный поиск (слова, фразы, формы слов)…")
         self.ed_query.returnPressed.connect(self.do_search)
         row1.addWidget(self.ed_query, 1)
         b_search = QPushButton(self.tr("search_btn"))
         b_search.setObjectName("accent")
         b_search.clicked.connect(self.do_search)
-        self._decorate(b_search, "search.png", 80)
+        self._decorate(b_search, "search.png")
         row1.addWidget(b_search)
         v.addLayout(row1)
 
@@ -496,6 +497,9 @@ class MainWindow(QMainWindow):
         self.file_ctrl.filtersChanged.connect(self._refresh_file_list_ui)
         self.project_ctrl.categoriesChanged.connect(self._refresh_filter_controls)
         self.project_ctrl.metadataChanged.connect(lambda _: self._mark_all_tabs_dirty())
+        self.project_ctrl.autoSaved.connect(
+            lambda path: self.statusBar().showMessage(f"✓ Проект сохранён (autosave): {Path(path).name}", 2500)
+        )
 
     def _setup_hotkeys(self):
         for act in getattr(self, "_hotkey_actions", []):
@@ -691,8 +695,10 @@ class MainWindow(QMainWindow):
 
         self.cmb_filter_cat.addItem(self.tr("all_categories"), "")
         self.cmb_filter_cat.addItem(self.tr("uncategorized"), "__none__")
-        for c in sorted(self.project_ctrl.categories):
-            self.cmb_filter_cat.addItem(c, c)
+
+        # Иерархический вывод категорий с отступами
+        for full_cat, depth, label in self.project_ctrl.get_hierarchical_categories():
+            self.cmb_filter_cat.addItem(label, full_cat)
 
         self.cmb_filter_tag.addItem(self.tr("all_tags"), "")
         all_tags = sorted({t for vals in self.project_ctrl.chat_tags.values() for t in vals})
@@ -1107,7 +1113,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, f"Failed to load project: {ex}")
 
     def create_category(self):
-        name, ok = QInputDialog.getText(self, APP_NAME, self.tr("category_name"))
+        name, ok = QInputDialog.getText(self, APP_NAME, "Название категории (поддерживается Work/Research):")
         if not ok or not name.strip():
             return
         self.project_ctrl.create_category(
@@ -1119,7 +1125,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, self.tr("open_first"))
             return
         cur_path = self.file_ctrl.current.path
-        cats = sorted(self.project_ctrl.categories) or [self.tr("uncategorized")]
+        cats = [c[0] for c in self.project_ctrl.get_hierarchical_categories()] or [self.tr("uncategorized")]
         name, ok = QInputDialog.getItem(self, APP_NAME, self.tr("category_name"), cats, 0, True)
         if not ok or not name.strip():
             return
@@ -1200,7 +1206,7 @@ class MainWindow(QMainWindow):
             f"Loaded {len(reg.plugins)} plugins:\n\n{names}\n\nUser plugins folder: {Path.home() / '.local' / 'share' / APP_NAME / 'plugins'}",
         )
 
-    # ---- Indexer & Search Tab ----
+    # ---- Indexer & Hybrid Search Tab ----
     def _get_index(self) -> SearchIndex:
         if self._index is None:
             self._index = SearchIndex()
@@ -1268,7 +1274,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, APP_NAME, self.tr("open_first"))
                 return
 
-            hits = fast_search_chats(chats, q, scope, max_workers=4, limit=300, use_stemming=True)
+            # Выполняем гибридный поиск (FTS5 + Стемминг + Векторное сходство)
+            hits = self.hybrid_engine.search_chats(chats, q, scope=scope, limit=300)
             if not hits:
                 it = QListWidgetItem(self.tr("search_no_results"))
                 it.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -1279,8 +1286,9 @@ class MainWindow(QMainWindow):
                 icon = "💭" if h.is_thought else ("👤" if h.role == "user" else "🤖")
                 target_chat = next((c for c in chats if c.path == h.chat_path), None)
                 badge = self.file_ctrl.format_badge(target_chat, self.tr) if target_chat else ""
-                it = QListWidgetItem(f"{icon} {h.chat_title}  ·  {badge}  ·  #{h.msg_num}\n{h.snippet}")
-                it.setToolTip(h.chat_path)
+                score_str = f"[{h.score:.0f}%]"
+                it = QListWidgetItem(f"{icon} {h.chat_title}  ·  {badge}  ·  #{h.msg_num}  {score_str}\n{h.snippet}")
+                it.setToolTip(f"{h.chat_path}\nScore: {h.score} (FTS: {h.fts_score}, Stem: {h.stem_score}, Semantic: {h.semantic_score})")
                 it.setData(Qt.ItemDataRole.UserRole, (h.chat_path, "log"))
                 self.search_results.addItem(it)
 
@@ -1307,25 +1315,25 @@ class MainWindow(QMainWindow):
             kind = "log"
 
         try:
-            hits = self._index.search(q, role=role, thoughts=thoughts, kind=kind, limit=300)
+            index_hits = self._index.search(q, role=role, thoughts=thoughts, kind=kind, limit=300)
         except Exception as ex:
             QMessageBox.warning(self, APP_NAME, str(ex))
             return
 
-        if not hits:
+        if not index_hits:
             it = QListWidgetItem(self.tr("search_no_results"))
             it.setFlags(Qt.ItemFlag.NoItemFlags)
             self.search_results.addItem(it)
             return
 
-        for h in hits:
+        for h in index_hits:
             icon = "📄" if h.kind == "txt" else ("💭" if h.is_thought else ("👤" if h.role == "user" else "🤖"))
             it = QListWidgetItem(f"{icon} {h.title}  ·  {h.model or '—'}  ·  #{h.msg_num}\n{h.snippet}")
             it.setToolTip(h.path)
             it.setData(Qt.ItemDataRole.UserRole, (h.path, h.kind))
             self.search_results.addItem(it)
 
-        self.statusBar().showMessage(self.tr("search_results_n", n=len(hits)), 5000)
+        self.statusBar().showMessage(self.tr("search_results_n", n=len(index_hits)), 5000)
 
     def _open_search_hit(self, item: QListWidgetItem):
         data = item.data(Qt.ItemDataRole.UserRole)

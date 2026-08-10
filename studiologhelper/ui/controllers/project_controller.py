@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""ProjectController — управление проектами .slh.json, категориями, тегами, заметками и закладками."""
+"""ProjectController — управление проектами .slh.json, иерархическими категориями, тегами, заметками, закладками, цитатами и автосохранением."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 try:
-    from PyQt6.QtCore import QObject, QSettings, pyqtSignal
+    from PyQt6.QtCore import QObject, QSettings, QTimer, pyqtSignal
 except ImportError:
     class QObject:  # type: ignore
         def __init__(self, *args, **kwargs):
@@ -37,8 +37,24 @@ except ImportError:
     class QSettings:  # type: ignore
         pass
 
+    class QTimer:  # type: ignore
+        def __init__(self, parent=None):
+            pass
+        def setSingleShot(self, val):
+            pass
+        def start(self, ms=0):
+            pass
+        def stop(self):
+            pass
+
 from ...core.models import ChatLog
-from ...core.project import Project, ProjectBookmark, ProjectFile
+from ...core.project import (
+    HIGHLIGHT_COLORS,
+    Project,
+    ProjectBookmark,
+    ProjectFile,
+    matches_hierarchical_category,
+)
 from ...utils.logger import get_logger
 from ..undo import Command, UndoManager
 
@@ -46,12 +62,13 @@ logger = get_logger()
 
 
 class ProjectController(QObject):
-    """Контроллер метаданных проекта, категорий, тегов, заметок и закладок."""
+    """Контроллер проектов, иерархических категорий, тегов, закладок, цитат-маркеров и автосохранения."""
 
     projectChanged = pyqtSignal()
     metadataChanged = pyqtSignal(str)  # chat_path
     categoriesChanged = pyqtSignal()
     bookmarksChanged = pyqtSignal(str)  # chat_path
+    autoSaved = pyqtSignal(str)  # project_path
 
     def __init__(self, settings: Any, undo_manager: UndoManager | None = None):
         super().__init__()
@@ -60,6 +77,8 @@ class ProjectController(QObject):
 
         self.current_project_path: str = ""
         self.current_project_name: str = ""
+        self.auto_save_enabled: bool = True
+        self._cached_chats_ref: List[ChatLog] = []
 
         self.chat_categories: Dict[str, str] = self._load_json("org/chat_categories", {})
         self.chat_notes: Dict[str, str] = self._load_json("org/chat_notes", {})
@@ -95,33 +114,72 @@ class ProjectController(QObject):
         self._save_json("org/chat_bookmarks", self.chat_bookmarks)
         self._save_json("org/recent_projects", self.recent_projects)
 
-    # ---- Categories ----
+    def trigger_autosave(self):
+        """Автоматическое сохранение проекта при изменениях."""
+        if not self.auto_save_enabled:
+            return
+        self.save_all_to_settings()
+        if self.current_project_path and Path(self.current_project_path).exists():
+            try:
+                self.save_project(self.current_project_path, self._cached_chats_ref, self.current_project_name)
+                self.autoSaved.emit(self.current_project_path)
+            except Exception as ex:
+                logger.warning("Autosave failed: %s", ex)
+
+    def set_active_chats_ref(self, chats: List[ChatLog]):
+        self._cached_chats_ref = chats
+
+    # ---- Hierarchical Categories ----
+    def get_hierarchical_categories(self) -> List[Tuple[str, int, str]]:
+        """
+        Возвращает упорядоченный список категорий с иерархией:
+        [(full_path, depth, display_label), ...]
+        Например: [("Work", 0, "📁 Work"), ("Work/Research", 1, "  └ 📁 Research"), ...]
+        """
+        all_cats = sorted(self.categories)
+        result: List[Tuple[str, int, str]] = []
+        for cat in all_cats:
+            parts = [p.strip() for p in cat.split("/") if p.strip()]
+            depth = max(0, len(parts) - 1)
+            prefix = "  " * depth + ("└ " if depth > 0 else "")
+            display_name = f"{prefix}📁 {parts[-1]}" if parts else cat
+            result.append((cat, depth, display_name))
+        return result
+
     def get_category(self, path_or_chat: str | ChatLog) -> str:
         p = path_or_chat.path if isinstance(path_or_chat, ChatLog) else path_or_chat
         return self.chat_categories.get(p or "", "")
 
     def create_category(self, name: str, callback: Optional[Callable] = None):
-        name = name.strip()
+        name = name.strip().strip("/")
         if not name or name in self.categories:
             return
         old_cats = set(self.categories)
 
         def do():
             self.categories.add(name)
+            # Автоматически добавляем родительские категории если есть /
+            parts = name.split("/")
+            for i in range(1, len(parts)):
+                parent = "/".join(parts[:i])
+                if parent:
+                    self.categories.add(parent)
             self.categoriesChanged.emit()
+            self.trigger_autosave()
             if callback:
                 callback()
 
         def undo():
             self.categories = set(old_cats)
             self.categoriesChanged.emit()
+            self.trigger_autosave()
             if callback:
                 callback()
 
         self.undo_manager.execute(Command(f"Create category '{name}'", do, undo))
 
     def assign_category(self, path: str, name: str, callback: Optional[Callable] = None):
-        name = name.strip()
+        name = name.strip().strip("/")
         old_cat = self.chat_categories.get(path, "")
 
         def do():
@@ -133,6 +191,7 @@ class ProjectController(QObject):
             self._save_json("org/chat_categories", self.chat_categories)
             self.categoriesChanged.emit()
             self.metadataChanged.emit(path)
+            self.trigger_autosave()
             if callback:
                 callback()
 
@@ -144,6 +203,7 @@ class ProjectController(QObject):
             self._save_json("org/chat_categories", self.chat_categories)
             self.categoriesChanged.emit()
             self.metadataChanged.emit(path)
+            self.trigger_autosave()
             if callback:
                 callback()
 
@@ -166,6 +226,7 @@ class ProjectController(QObject):
                 self.chat_tags.pop(path, None)
             self._save_json("org/chat_tags", self.chat_tags)
             self.metadataChanged.emit(path)
+            self.trigger_autosave()
             if callback:
                 callback()
 
@@ -176,6 +237,7 @@ class ProjectController(QObject):
                 self.chat_tags.pop(path, None)
             self._save_json("org/chat_tags", self.chat_tags)
             self.metadataChanged.emit(path)
+            self.trigger_autosave()
             if callback:
                 callback()
 
@@ -197,6 +259,7 @@ class ProjectController(QObject):
                 self.chat_notes.pop(path, None)
             self._save_json("org/chat_notes", self.chat_notes)
             self.metadataChanged.emit(path)
+            self.trigger_autosave()
             if callback:
                 callback()
 
@@ -207,12 +270,13 @@ class ProjectController(QObject):
                 self.chat_notes.pop(path, None)
             self._save_json("org/chat_notes", self.chat_notes)
             self.metadataChanged.emit(path)
+            self.trigger_autosave()
             if callback:
                 callback()
 
         self.undo_manager.execute(Command("Set note", do, undo))
 
-    # ---- Bookmarks ----
+    # ---- Bookmarks & Highlighter Quotes ----
     def get_bookmarks(self, path_or_chat: str | ChatLog) -> List[Dict[str, Any]]:
         p = path_or_chat.path if isinstance(path_or_chat, ChatLog) else path_or_chat
         return list(self.chat_bookmarks.get(p or "", []))
@@ -229,21 +293,27 @@ class ProjectController(QObject):
         title: str = "",
         note: str = "",
         snippet: str = "",
+        quote: str = "",
+        color: str = "",
         callback: Optional[Callable] = None,
     ):
         if not path:
             return
         bms = self.get_bookmarks(path)
-        for b in bms:
-            if b.get("block_num") == block_num:
-                b["note"] = note
-                b["role"] = role or b.get("role", "")
-                b["snippet"] = snippet or b.get("snippet", "")
-                self._save_json("org/chat_bookmarks", self.chat_bookmarks)
-                self.bookmarksChanged.emit(path)
-                if callback:
-                    callback()
-                return
+        # Если это закладка без цитаты — обновляем существующую
+        if not quote:
+            for b in bms:
+                if b.get("block_num") == block_num and not b.get("quote"):
+                    b["note"] = note
+                    b["role"] = role or b.get("role", "")
+                    b["snippet"] = snippet or b.get("snippet", "")
+                    b["color"] = color or b.get("color", "")
+                    self._save_json("org/chat_bookmarks", self.chat_bookmarks)
+                    self.bookmarksChanged.emit(path)
+                    self.trigger_autosave()
+                    if callback:
+                        callback()
+                    return
 
         new_bm = {
             "block_num": block_num,
@@ -251,13 +321,39 @@ class ProjectController(QObject):
             "title": title,
             "note": note,
             "snippet": snippet[:200] if snippet else "",
+            "quote": quote.strip(),
+            "color": color or "yellow",
+            "created_at": "",
         }
         bms.append(new_bm)
         self.chat_bookmarks[path] = bms
         self._save_json("org/chat_bookmarks", self.chat_bookmarks)
         self.bookmarksChanged.emit(path)
+        self.trigger_autosave()
         if callback:
             callback()
+
+    def add_highlight(
+        self,
+        path: str,
+        block_num: int,
+        quote: str,
+        color: str = "yellow",
+        role: str = "",
+        title: str = "",
+        note: str = "",
+    ):
+        """Добавляет маркер/выделенную цитату."""
+        self.add_bookmark(
+            path=path,
+            block_num=block_num,
+            role=role,
+            title=title,
+            note=note,
+            snippet=quote[:200],
+            quote=quote,
+            color=color,
+        )
 
     def remove_bookmark(self, path: str, block_num: int, callback: Optional[Callable] = None):
         if not path or path not in self.chat_bookmarks:
@@ -269,8 +365,24 @@ class ProjectController(QObject):
             self.chat_bookmarks.pop(path, None)
         self._save_json("org/chat_bookmarks", self.chat_bookmarks)
         self.bookmarksChanged.emit(path)
+        self.trigger_autosave()
         if callback:
             callback()
+
+    def remove_highlight(self, path: str, block_num: int, quote: str):
+        if not path or path not in self.chat_bookmarks:
+            return
+        bms = [
+            b for b in self.chat_bookmarks[path]
+            if not (b.get("block_num") == block_num and b.get("quote") == quote)
+        ]
+        if bms:
+            self.chat_bookmarks[path] = bms
+        else:
+            self.chat_bookmarks.pop(path, None)
+        self._save_json("org/chat_bookmarks", self.chat_bookmarks)
+        self.bookmarksChanged.emit(path)
+        self.trigger_autosave()
 
     def toggle_bookmark(
         self,
@@ -286,7 +398,7 @@ class ProjectController(QObject):
             self.remove_bookmark(path, block_num, callback)
             return False
         else:
-            self.add_bookmark(path, block_num, role, title, note, snippet, callback)
+            self.add_bookmark(path, block_num, role, title, note, snippet, callback=callback)
             return True
 
     def get_all_bookmarks(self) -> List[Dict[str, Any]]:
@@ -300,6 +412,7 @@ class ProjectController(QObject):
     def save_project(self, file_path: str | Path, chats: List[ChatLog], name: str = ""):
         p_path = Path(file_path)
         name = name or p_path.stem
+        self._cached_chats_ref = chats
 
         files_meta = []
         for chat in chats:
@@ -310,6 +423,8 @@ class ProjectController(QObject):
                     title=b.get("title", ""),
                     note=b.get("note", ""),
                     snippet=b.get("snippet", ""),
+                    quote=b.get("quote", ""),
+                    color=b.get("color", ""),
                 )
                 for b in self.get_bookmarks(chat.path)
             ]

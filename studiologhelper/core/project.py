@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Project .slh.json manager с валидацией и поддержкой закладок/метаданных."""
+"""Project .slh.json manager с валидацией, иерархическими категориями, цитатами и маркерами."""
 
 from __future__ import annotations
 
@@ -7,9 +7,17 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional, Set
 
 SCHEMA = "studiologhelper.project.v2"
+
+# Цвета маркеров (Highlighters)
+HIGHLIGHT_COLORS = {
+    "yellow": {"name": "Жёлтый", "hex": "#fff176", "text": "#333333"},
+    "green": {"name": "Зелёный", "hex": "#a5d6a7", "text": "#1b5e20"},
+    "pink": {"name": "Розовый", "hex": "#f48fb1", "text": "#880e4f"},
+    "blue": {"name": "Голубой", "hex": "#90caf9", "text": "#0d47a1"},
+}
 
 
 @dataclass(slots=True)
@@ -20,6 +28,8 @@ class ProjectBookmark:
     title: str = ""
     note: str = ""
     snippet: str = ""
+    quote: str = ""  # Текст выделенной цитаты
+    color: str = ""  # yellow, green, pink, blue или hex
     created_at: str = ""
 
     def to_dict(self) -> dict:
@@ -30,6 +40,8 @@ class ProjectBookmark:
             "title": self.title,
             "note": self.note,
             "snippet": self.snippet,
+            "quote": self.quote,
+            "color": self.color,
             "created_at": self.created_at or datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -42,6 +54,8 @@ class ProjectBookmark:
             title=str(d.get("title", "")),
             note=str(d.get("note", "")),
             snippet=str(d.get("snippet", "")),
+            quote=str(d.get("quote", "")),
+            color=str(d.get("color", "")),
             created_at=str(d.get("created_at", "")),
         )
 
@@ -94,6 +108,24 @@ class ProjectFile:
             messages=int(item.get("messages", 0)),
             bookmarks=bookmarks,
         )
+
+
+def matches_hierarchical_category(item_cat: str, filter_cat: str) -> bool:
+    """
+    Проверяет вхождение категории в иерархический фильтр.
+    Если filter_cat == "Work", подходит "Work", "Work/Research", "Work/Research/Gemini".
+    """
+    if not filter_cat:
+        return True
+    if filter_cat == "__none__":
+        return not bool(item_cat)
+    if not item_cat:
+        return False
+    item_parts = [p.strip().lower() for p in item_cat.split("/") if p.strip()]
+    filter_parts = [p.strip().lower() for p in filter_cat.split("/") if p.strip()]
+    if len(item_parts) < len(filter_parts):
+        return False
+    return item_parts[: len(filter_parts)] == filter_parts
 
 
 @dataclass(slots=True)

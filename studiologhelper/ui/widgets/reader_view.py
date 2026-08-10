@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""reader_view.py — Высокопроизводительный режим чтения («Книга») для логов и TXT/MD.
+"""reader_view.py — Высокопроизводительный режим чтения («Книга») с маркерами/цитатами.
 
-Оптимизирован для мгновенной отрисовки без фризов (0% CPU в простое, 60 FPS скролл):
+Возможности:
+  - Интерактивное выделение цитат маркером (🟡 Жёлтый, 🟢 Зелёный, 🌸 Розовый, 🔵 Голубой)
+  - Сохранение цитат и заметок в проект .slh.json
   - Аппаратно-ускоренный рендеринг через единый QTextBrowser с книжным CSS
   - Палитры длительного чтения: Тёплая бумага (#fdf6e3), Винтажная сепия (#f4ecd8), Soft OLED (#191a21)
-  - Типографика: Serif (Georgia / Noto Serif), настраиваемый интерлиньяж (1.4x-2.0x), масштаб
-  - Навигация: мгновенный переход по якорям (#block_N), оглавление/TOC, Ctrl+Up/Down
-  - Умный поиск по смыслу/словоформам (стемминг Портера RU/EN, фразы, префиксы)
-  - Закладки (Ctrl+B) с сохранением в проекте .slh.json
+  - Адаптивное масштабирование кнопок и шрифта без перекосов интерфейса
+  - Умный поиск по смыслу и словоформам
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QPoint, QRect, QSettings, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
+    QAction,
     QColor,
     QDesktopServices,
     QFont,
@@ -60,6 +61,7 @@ from ...core.markdown import markdown_to_html
 from ...core.models import ChatLog, Message
 from ...core.parsers.parser import parse_file
 from ...core.parsers.text_parser import parse_text_log
+from ...core.project import HIGHLIGHT_COLORS
 from ...indexer.stemmer import match_stemmed_query
 from ..controllers.project_controller import ProjectController
 from ..themes import THEMES
@@ -77,14 +79,14 @@ class ReaderBlock:
     token_count: int = 0
     attachments: List[str] = field(default_factory=list)
     is_bookmarked: bool = False
+    highlights: List[Dict[str, str]] = field(default_factory=list)  # list of {quote, color, note}
 
 
-# Alias for backward compatibility
-ReaderBlockCard = ReaderBlock
+ReaderBlockCard = ReaderBlock  # Alias
 
 
 class ReaderView(QWidget):
-    """Высокопроизводительный книжный режим чтения."""
+    """Высокопроизводительный книжный режим чтения с маркерами цитат."""
 
     bookmarkJump = pyqtSignal(str, int)  # path, block_num
 
@@ -122,7 +124,7 @@ class ReaderView(QWidget):
         self.show_thoughts = self.settings.value("ui/show_thoughts", "true") == "true"
 
         # Search state
-        self._search_matches: List[int] = []  # block numbers
+        self._search_matches: List[int] = []
         self._search_cur_match_idx: int = -1
 
         self._build_ui()
@@ -133,20 +135,23 @@ class ReaderView(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # 1. Top Reading Toolbar
+        # 1. Top Reading Toolbar (Адаптивные размеры, без фиксированной обрезки)
         tb = QFrame()
         tb.setObjectName("readerToolbar")
         tb.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         tbl = QHBoxLayout(tb)
-        tbl.setContentsMargins(10, 6, 10, 6)
-        tbl.setSpacing(6)
+        tbl.setContentsMargins(8, 6, 8, 6)
+        tbl.setSpacing(8)
 
         b_open_ext = QPushButton(self._tr("reader_open_file"))
+        b_open_ext.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         b_open_ext.clicked.connect(self.open_external_file)
         tbl.addWidget(b_open_ext)
 
-        tbl.addWidget(QLabel(self._tr("reader_theme")))
+        lbl_thm = QLabel(self._tr("reader_theme"))
+        tbl.addWidget(lbl_thm)
         self.cmb_theme = QComboBox()
+        self.cmb_theme.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.cmb_theme.addItem("📜 Тёплая бумага (Solarized)", "reading_warm")
         self.cmb_theme.addItem("🕰 Винтажная сепия", "reading_sepia")
         self.cmb_theme.addItem("🌙 Ночное чтение", "reading_dark")
@@ -159,6 +164,7 @@ class ReaderView(QWidget):
 
         tbl.addWidget(QLabel("Шрифт:"))
         self.cmb_font = QComboBox()
+        self.cmb_font.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.cmb_font.addItem("Serif (Georgia / Noto)", "serif")
         self.cmb_font.addItem("Sans (Системный)", "sans")
         self.cmb_font.addItem("Mono (Код)", "mono")
@@ -167,14 +173,15 @@ class ReaderView(QWidget):
         self.cmb_font.currentIndexChanged.connect(self._on_font_changed)
         tbl.addWidget(self.cmb_font)
 
+        # Масштаб шрифта
         b_fs_dec = QPushButton("A−")
-        b_fs_dec.setFixedWidth(32)
+        b_fs_dec.setMinimumWidth(28)
         b_fs_dec.clicked.connect(lambda: self._change_font_size(-1.0))
         b_fs_inc = QPushButton("A+")
-        b_fs_inc.setFixedWidth(32)
+        b_fs_inc.setMinimumWidth(28)
         b_fs_inc.clicked.connect(lambda: self._change_font_size(1.0))
         self.lbl_fs = QLabel(f"{self.font_size_pt:.0f}pt")
-        self.lbl_fs.setFixedWidth(36)
+        self.lbl_fs.setMinimumWidth(32)
         self.lbl_fs.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tbl.addWidget(b_fs_dec)
         tbl.addWidget(self.lbl_fs)
@@ -182,6 +189,7 @@ class ReaderView(QWidget):
 
         tbl.addWidget(QLabel("Интервал:"))
         self.cmb_lh = QComboBox()
+        self.cmb_lh.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.cmb_lh.addItem("1.4x", 1.4)
         self.cmb_lh.addItem("1.7x", 1.7)
         self.cmb_lh.addItem("2.0x", 2.0)
@@ -192,6 +200,7 @@ class ReaderView(QWidget):
 
         tbl.addWidget(QLabel("Ширина:"))
         self.cmb_width = QComboBox()
+        self.cmb_width.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.cmb_width.addItem("740px", "compact")
         self.cmb_width.addItem("920px", "medium")
         self.cmb_width.addItem("100%", "full")
@@ -202,13 +211,30 @@ class ReaderView(QWidget):
 
         tbl.addStretch(1)
 
+        # Выделить цитату маркером (меню быстрых цветов)
+        self.btn_highlight = QToolButton()
+        self.btn_highlight.setText("🖍 Маркер ▾")
+        self.btn_highlight.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        hm = QMenu(self.btn_highlight)
+        hm.addAction("🟡 Жёлтый маркер", lambda: self.highlight_selection("yellow"))
+        hm.addAction("🟢 Зелёный маркер", lambda: self.highlight_selection("green"))
+        hm.addAction("🌸 Розовый маркер", lambda: self.highlight_selection("pink"))
+        hm.addAction("🔵 Голубой маркер", lambda: self.highlight_selection("blue"))
+        hm.addSeparator()
+        hm.addAction("🗑 Снять выделение", self.clear_selected_highlight)
+        self.btn_highlight.setMenu(hm)
+        tbl.addWidget(self.btn_highlight)
+
         self.btn_tb_bm = QPushButton(self._tr("bookmark_toggle"))
+        self.btn_tb_bm.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.btn_tb_bm.clicked.connect(self._toggle_current_bookmark)
         tbl.addWidget(self.btn_tb_bm)
 
         b_prev = QPushButton(self._tr("reader_prev_block"))
+        b_prev.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         b_prev.clicked.connect(self.prev_block)
         b_next = QPushButton(self._tr("reader_next_block"))
+        b_next.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         b_next.clicked.connect(self.next_block)
         tbl.addWidget(b_prev)
         tbl.addWidget(b_next)
@@ -219,7 +245,7 @@ class ReaderView(QWidget):
         self.search_bar_widget = QFrame()
         self.search_bar_widget.setObjectName("readerToolbar")
         sbl = QHBoxLayout(self.search_bar_widget)
-        sbl.setContentsMargins(10, 4, 10, 4)
+        sbl.setContentsMargins(8, 4, 8, 4)
         sbl.setSpacing(6)
 
         sbl.addWidget(QLabel("🔎 Поиск по смыслу:"))
@@ -231,6 +257,7 @@ class ReaderView(QWidget):
 
         b_find = QPushButton(self._tr("search_btn"))
         b_find.setObjectName("accent")
+        b_find.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         b_find.clicked.connect(self._do_smart_search)
         sbl.addWidget(b_find)
 
@@ -240,21 +267,20 @@ class ReaderView(QWidget):
 
         b_prev_match = QPushButton("▲")
         b_prev_match.setToolTip("Предыдущее совпадение")
-        b_prev_match.setFixedWidth(28)
+        b_prev_match.setMinimumWidth(26)
         b_prev_match.clicked.connect(self._prev_search_match)
         b_next_match = QPushButton("▼")
         b_next_match.setToolTip("Следующее совпадение")
-        b_next_match.setFixedWidth(28)
+        b_next_match.setMinimumWidth(26)
         b_next_match.clicked.connect(self._next_search_match)
         sbl.addWidget(b_prev_match)
         sbl.addWidget(b_next_match)
 
         root.addWidget(self.search_bar_widget)
 
-        # 3. Main Splitter: Left TOC, Right QTextBrowser
+        # 3. Splitter: Left TOC/Quotes, Right Browser
         split = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left TOC / Bookmarks sidebar
         toc_widget = QWidget()
         tl = QVBoxLayout(toc_widget)
         tl.setContentsMargins(6, 6, 6, 6)
@@ -266,7 +292,8 @@ class ReaderView(QWidget):
         toc_hdr.addWidget(self.lbl_toc_title)
         toc_hdr.addStretch(1)
 
-        self.btn_toc_mode = QPushButton("Все / 🔖 Закладки")
+        self.btn_toc_mode = QPushButton("Все / 🔖 Закладки и Цитаты")
+        self.btn_toc_mode.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.btn_toc_mode.setCheckable(True)
         self.btn_toc_mode.toggled.connect(self._refresh_toc)
         toc_hdr.addWidget(self.btn_toc_mode)
@@ -278,7 +305,6 @@ class ReaderView(QWidget):
 
         split.addWidget(toc_widget)
 
-        # Right: Optimized QTextBrowser Book Canvas
         self.browser = QTextBrowser()
         self.browser.setOpenLinks(False)
         self.browser.anchorClicked.connect(self._on_anchor_clicked)
@@ -295,13 +321,14 @@ class ReaderView(QWidget):
         bot.setObjectName("readerToolbar")
         bot.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         bl = QHBoxLayout(bot)
-        bl.setContentsMargins(12, 4, 12, 4)
+        bl.setContentsMargins(10, 4, 10, 4)
 
         self.lbl_progress = QLabel(self._tr("reader_block_info", cur=0, total=0))
         bl.addWidget(self.lbl_progress)
         bl.addStretch(1)
 
         b_exp_clean = QPushButton(self._tr("reader_export_clean"))
+        b_exp_clean.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         b_exp_clean.clicked.connect(self._export_clean_reader_text)
         bl.addWidget(b_exp_clean)
 
@@ -377,7 +404,13 @@ class ReaderView(QWidget):
             return
 
         path = self.current_chat.path
-        bms = {b.get("block_num") for b in self.project_ctrl.get_bookmarks(path)}
+        bms = self.project_ctrl.get_bookmarks(path)
+
+        def get_block_highlights(num: int) -> List[Dict[str, str]]:
+            return [b for b in bms if b.get("block_num") == num and b.get("quote")]
+
+        def is_block_bm(num: int) -> bool:
+            return any(b.get("block_num") == num and not b.get("quote") for b in bms)
 
         if self.current_chat.system_instruction:
             self.blocks.append(
@@ -387,7 +420,8 @@ class ReaderView(QWidget):
                     is_user=False,
                     model=self.current_chat.model,
                     text=self.current_chat.system_instruction,
-                    is_bookmarked=(0 in bms),
+                    is_bookmarked=is_block_bm(0),
+                    highlights=get_block_highlights(0),
                 )
             )
 
@@ -404,9 +438,40 @@ class ReaderView(QWidget):
                     time_str=msg.time_str(),
                     token_count=msg.token_count,
                     attachments=att_labels,
-                    is_bookmarked=(i in bms),
+                    is_bookmarked=is_block_bm(i),
+                    highlights=get_block_highlights(i),
                 )
             )
+
+    def _apply_highlights_to_text(self, text: str, highlights: List[Dict[str, str]]) -> str:
+        if not highlights or not text:
+            return text
+        res = text
+        for h in highlights:
+            quote = h.get("quote", "").strip()
+            if not quote:
+                continue
+            color_key = h.get("color", "yellow")
+            c_info = HIGHLIGHT_COLORS.get(color_key, HIGHLIGHT_COLORS["yellow"])
+            bg_hex = c_info["hex"]
+            fg_hex = c_info["text"]
+            mark_tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;">{_html.escape(quote)}</mark>'
+            res = res.replace(quote, f"@@@MARK_{id(h)}@@@")
+
+        res = _html.escape(res).replace("\n", "<br/>")
+        for h in highlights:
+            quote = h.get("quote", "").strip()
+            if not quote:
+                continue
+            color_key = h.get("color", "yellow")
+            c_info = HIGHLIGHT_COLORS.get(color_key, HIGHLIGHT_COLORS["yellow"])
+            bg_hex = c_info["hex"]
+            fg_hex = c_info["text"]
+            note = h.get("note", "")
+            note_attr = f' title="{_html.escape(note)}"' if note else ""
+            mark_tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;"{note_attr}>{_html.escape(quote)}</mark>'
+            res = res.replace(f"@@@MARK_{id(h)}@@@", mark_tag)
+        return res
 
     def rebuild_view(self):
         if not self.blocks:
@@ -446,7 +511,7 @@ class ReaderView(QWidget):
                 font-size: {font_size};
                 line-height: {line_height};
                 margin: 0;
-                padding: 20px 10px;
+                padding: 16px 8px;
             }}
             .book-container {{
                 max-width: {max_width};
@@ -464,7 +529,7 @@ class ReaderView(QWidget):
             }}
             .card-header {{
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                font-size: 11.5pt;
+                font-size: 11pt;
                 font-weight: bold;
                 margin-bottom: 10px;
                 padding-bottom: 6px;
@@ -477,15 +542,23 @@ class ReaderView(QWidget):
                 font-size: 9.5pt;
                 color: {muted_color};
                 font-weight: normal;
-                margin-left: 12px;
+                margin-left: 10px;
             }}
             .bm-tag {{
                 background-color: {bm_color};
                 color: #ffffff;
-                font-size: 9pt;
+                font-size: 8.5pt;
                 padding: 2px 6px;
                 border-radius: 4px;
-                margin-left: 10px;
+                margin-left: 8px;
+            }}
+            .hl-tag {{
+                background-color: #fff176;
+                color: #333333;
+                font-size: 8.5pt;
+                padding: 2px 6px;
+                border-radius: 4px;
+                margin-left: 8px;
             }}
             .thought-box {{
                 background-color: {thought_bg};
@@ -509,7 +582,7 @@ class ReaderView(QWidget):
                 border-radius: 6px;
                 padding: 10px;
                 font-family: Consolas, "Courier New", monospace;
-                font-size: 10.5pt;
+                font-size: 10pt;
                 overflow-x: auto;
             }}
             code {{
@@ -541,6 +614,9 @@ class ReaderView(QWidget):
             )
 
             bm_html = f"<span class='bm-tag'>🔖 {self._tr('reader_bookmarks')}</span>" if b.is_bookmarked else ""
+            if b.highlights:
+                bm_html += f" <span class='hl-tag'>🖍 Цитат: {len(b.highlights)}</span>"
+
             meta_parts = []
             if b.token_count:
                 meta_parts.append(f"{b.token_count} {self._tr('tokens_short')}")
@@ -565,8 +641,10 @@ class ReaderView(QWidget):
                 att_items = "".join(f"<div>📎 {_html.escape(a)}</div>" for a in b.attachments)
                 att_html = f"<div style='color:{muted_color}; margin-bottom:8px; font-size:10pt;'>{att_items}</div>"
 
-            # Body text
-            if self.render_md and not is_user:
+            # Body text with Highlights
+            if b.highlights:
+                body_content = self._apply_highlights_to_text(b.text, b.highlights)
+            elif self.render_md and not is_user:
                 body_content = markdown_to_html(b.text)
             else:
                 body_content = _html.escape(b.text).replace("\n", "<br/>") if b.text else f"<i>{self._tr('empty_message')}</i>"
@@ -600,28 +678,36 @@ class ReaderView(QWidget):
 
     def _refresh_toc(self):
         self.toc_list.clear()
-        only_bookmarks = self.btn_toc_mode.isChecked()
+        only_bms = self.btn_toc_mode.isChecked()
 
         for b in self.blocks:
-            if only_bookmarks and not b.is_bookmarked:
+            has_bm_or_hl = b.is_bookmarked or bool(b.highlights)
+            if only_bms and not has_bm_or_hl:
                 continue
 
-            icon = "🔖 " if b.is_bookmarked else ("👤 " if b.is_user else "🤖 ")
+            icon = "🔖 " if b.is_bookmarked else ("🖍 " if b.highlights else ("👤 " if b.is_user else "🤖 "))
             role_txt = (
                 self._tr("user")
                 if b.is_user
                 else (self._tr("system_instruction") if b.role == "system" else (b.model or self._tr("model")))
             )
-            snippet = b.text.strip().replace("\n", " ")[:50]
-            if not snippet:
-                snippet = self._tr("empty_message")
 
-            item = QListWidgetItem(f"{icon}#{b.num} {role_txt}\n   {snippet}")
+            # Если есть цитата — покажем её в оглавлении
+            if b.highlights:
+                quote_preview = b.highlights[0].get("quote", "")[:45]
+                item_label = f"{icon}#{b.num} {role_txt} · «{quote_preview}…»"
+            else:
+                snippet = b.text.strip().replace("\n", " ")[:45]
+                if not snippet:
+                    snippet = self._tr("empty_message")
+                item_label = f"{icon}#{b.num} {role_txt}\n   {snippet}"
+
+            item = QListWidgetItem(item_label)
             item.setData(Qt.ItemDataRole.UserRole, b.num)
             self.toc_list.addItem(item)
 
-        if only_bookmarks and self.toc_list.count() == 0:
-            it = QListWidgetItem(self._tr("bookmarks_empty"))
+        if only_bms and self.toc_list.count() == 0:
+            it = QListWidgetItem("Нет закладок или цитат. Выделите текст и нажмите 'Маркер'.")
             it.setFlags(Qt.ItemFlag.NoItemFlags)
             self.toc_list.addItem(it)
 
@@ -648,6 +734,56 @@ class ReaderView(QWidget):
             return
         target = min(self.blocks[-1].num, self._current_block_num + 1)
         self.jump_to_block(target)
+
+    # ---- Highlighter & Quotes ----
+    def highlight_selection(self, color: str = "yellow"):
+        """Выделяет выбранный курсором фрагмент текста маркером."""
+        cursor = self.browser.textCursor()
+        if not cursor.hasSelection():
+            QMessageBox.information(self, "Маркер цитат", "Сначала выделите текст в окне чтения мышью.")
+            return
+
+        quote = cursor.selectedText().strip()
+        if not quote:
+            return
+
+        if not self.current_chat or not self.blocks:
+            return
+
+        path = self.current_chat.path
+        target_num = self._current_block_num
+
+        note, ok = QInputDialog.getText(
+            self,
+            "Цитата / Маркер",
+            f"Заметка к цитате ({HIGHLIGHT_COLORS.get(color, {}).get('name', color)} маркер):",
+            text="",
+        )
+        if not ok:
+            return
+
+        self.project_ctrl.add_highlight(
+            path=path,
+            block_num=target_num,
+            quote=quote,
+            color=color,
+            title=self.current_chat.title,
+            note=note.strip(),
+        )
+
+        self._load_blocks_from_chat()
+        self.rebuild_view()
+        self.jump_to_block(target_num)
+
+    def clear_selected_highlight(self):
+        cursor = self.browser.textCursor()
+        quote = cursor.selectedText().strip()
+        if not quote or not self.current_chat:
+            return
+        self.project_ctrl.remove_highlight(self.current_chat.path, self._current_block_num, quote)
+        self._load_blocks_from_chat()
+        self.rebuild_view()
+        self.jump_to_block(self._current_block_num)
 
     # ---- Bookmarks ----
     def _toggle_current_bookmark(self):
@@ -679,15 +815,13 @@ class ReaderView(QWidget):
         else:
             self.project_ctrl.remove_bookmark(path, target_num)
 
-        target_block.is_bookmarked = is_now_bm
+        self._load_blocks_from_chat()
         self.rebuild_view()
         self.jump_to_block(target_num)
 
     def _on_bookmarks_changed(self, path: str):
         if self.current_chat and self.current_chat.path == path:
-            bms = {b.get("block_num") for b in self.project_ctrl.get_bookmarks(path)}
-            for b in self.blocks:
-                b.is_bookmarked = (b.num in bms)
+            self._load_blocks_from_chat()
             self.rebuild_view()
 
     # ---- Setting Callbacks ----
@@ -775,7 +909,16 @@ class ReaderView(QWidget):
     def _show_browser_context_menu(self, pos):
         menu = self.browser.createStandardContextMenu()
         menu.addSeparator()
-        menu.addAction("🔖 Добавить закладку (Ctrl+B)", self._toggle_current_bookmark)
+
+        hl_sub = menu.addMenu("🖍 Выделить цитату маркером")
+        hl_sub.addAction("🟡 Жёлтый маркер", lambda: self.highlight_selection("yellow"))
+        hl_sub.addAction("🟢 Зелёный маркер", lambda: self.highlight_selection("green"))
+        hl_sub.addAction("🌸 Розовый маркер", lambda: self.highlight_selection("pink"))
+        hl_sub.addAction("🔵 Голубой маркер", lambda: self.highlight_selection("blue"))
+        hl_sub.addSeparator()
+        hl_sub.addAction("🗑 Снять выделение", self.clear_selected_highlight)
+
+        menu.addAction("🔖 Закладка на блок (Ctrl+B)", self._toggle_current_bookmark)
         menu.exec(self.browser.mapToGlobal(pos))
 
     # ---- Export Clean Text ----
@@ -786,6 +929,11 @@ class ReaderView(QWidget):
         for b in self.blocks:
             role_label = self._tr("user") if b.is_user else (b.model or self._tr("model"))
             lines.append(f"--- #{b.num} {role_label} ---")
+            if b.highlights:
+                for h in b.highlights:
+                    q = h.get("quote", "")
+                    n = h.get("note", "")
+                    lines.append(f"> 🖍 Цитата: {q}" + (f" ({n})" if n else ""))
             if b.text.strip():
                 lines.append(b.text.strip())
             lines.append("")
