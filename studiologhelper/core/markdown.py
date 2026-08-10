@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Оптимизированный Markdown -> HTML + fallback на библиотеку markdown если есть."""
+"""Оптимизированный Markdown -> HTML с защитой от сетевых запросов и зависаний."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import html as _html
 import re
 
 # Precompile all regex once
+RE_IMG = re.compile(r"!\[([^\]]*)\]\((https?://[^\s)]+)\)")
 RE_BOLD = re.compile(r"\*\*(.+?)\*\*")
 RE_ITALIC = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
 RE_CODE = re.compile(r"`([^`]+)`")
@@ -18,20 +19,27 @@ RE_UL = re.compile(r"^[-*+]\s+(.*)$")
 RE_OL = re.compile(r"^\d+[.)]\s+(.*)$")
 RE_CODE_FENCE = re.compile(r"^\s*```")
 
-# Optional fast path via markdown library
 try:
     import markdown as _md_lib
 
-    def markdown_to_html_fast(text: str) -> str:
-        return _md_lib.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
+    def _safe_md_lib(text: str) -> str:
+        # Заменяем ![alt](url) на безопасный бейдж до парсинга библиотекой markdown,
+        # чтобы Qt не пытался скачивать изображения по сети и не блокировал интерфейс/интернет
+        safe_text = RE_IMG.sub(r"📎 [\1](\2)", text)
+        html_out = _md_lib.markdown(safe_text, extensions=["fenced_code", "tables", "nl2br"])
+        # Дополнительно удаляем любые оставшиеся теги <img ...>
+        html_out = re.sub(r'<img\s+[^>]*src=["\'][^"\']*["\'][^>]*>', r'📎 [Изображение]', html_out, flags=re.IGNORECASE)
+        return html_out
 
     HAS_MARKDOWN_LIB = True
 except ImportError:
     HAS_MARKDOWN_LIB = False
-    markdown_to_html_fast = None  # type: ignore
+    _safe_md_lib = None  # type: ignore
 
 
 def _inline_md(escaped: str) -> str:
+    # Заменяем изображения на безопасные бейджи
+    escaped = RE_IMG.sub(r"📎 [\1](\2)", escaped)
     escaped = RE_CODE.sub(r"<code>\1</code>", escaped)
     escaped = RE_BOLD.sub(r"<b>\1</b>", escaped)
     escaped = RE_ITALIC.sub(r"<i>\1</i>", escaped)
@@ -142,10 +150,12 @@ def markdown_to_html_builtin(text: str) -> str:
 
 
 def markdown_to_html(text: str) -> str:
-    """Main entry — uses markdown lib if available, otherwise builtin (fast)."""
-    if HAS_MARKDOWN_LIB and len(text) > 500:  # for longer texts, lib is faster/better
+    """Main entry — uses safe markdown lib if available, otherwise fast builtin."""
+    if not text:
+        return ""
+    if HAS_MARKDOWN_LIB and len(text) > 500:
         try:
-            return markdown_to_html_fast(text)  # type: ignore
+            return _safe_md_lib(text)  # type: ignore
         except Exception:
             pass
     return markdown_to_html_builtin(text)

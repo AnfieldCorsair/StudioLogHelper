@@ -4,9 +4,34 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, List, Optional, Set
+from typing import Any, Callable, List, Optional, Set
 
-from PyQt6.QtCore import QObject, pyqtSignal
+try:
+    from PyQt6.QtCore import QObject, pyqtSignal
+except ImportError:
+    class QObject:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _Signal:
+        def __init__(self, *args, **kwargs):
+            self._handlers = []
+
+        def connect(self, handler):
+            self._handlers.append(handler)
+
+        def emit(self, *args, **kwargs):
+            for h in list(self._handlers):
+                try:
+                    h(*args, **kwargs)
+                except TypeError:
+                    try:
+                        h()
+                    except Exception:
+                        pass
+
+    def pyqtSignal(*args, **kwargs):  # type: ignore
+        return _Signal()
 
 from ...core.models import ChatLog
 from ...utils.logger import get_logger

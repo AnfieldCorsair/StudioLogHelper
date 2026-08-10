@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for reader mode, stemming search, controllers, and services."""
 
-import json
 from pathlib import Path
-from PyQt6.QtCore import QSettings
-
 from studiologhelper.core.models import ChatLog, Message
 from studiologhelper.core.project import Project, ProjectBookmark, ProjectFile
 from studiologhelper.i18n.translator import Translator
@@ -12,6 +9,18 @@ from studiologhelper.indexer.stemmer import match_stemmed_query, stem_ru, stem_e
 from studiologhelper.ui.controllers.project_controller import ProjectController
 from studiologhelper.ui.controllers.file_list_controller import FileListController
 from studiologhelper.ui.services.copy_service import CopyService
+
+
+class MockSettings:
+    """Mock for QSettings to test controllers without GUI dependencies."""
+    def __init__(self):
+        self._data = {}
+
+    def value(self, key, default=None):
+        return self._data.get(key, default)
+
+    def setValue(self, key, val):
+        self._data[key] = val
 
 
 def test_russian_and_english_stemmer():
@@ -73,7 +82,7 @@ def test_project_bookmarks_persistence(tmp_path):
 
 
 def test_controllers_and_services(tmp_path):
-    settings = QSettings(str(tmp_path / "test_settings.ini"), QSettings.Format.IniFormat)
+    settings = MockSettings()
     proj_ctrl = ProjectController(settings)
     file_ctrl = FileListController(proj_ctrl)
 
@@ -123,6 +132,6 @@ def test_controllers_and_services(tmp_path):
 
     # Copy service
     trans = Translator()
-    copy_text = CopyService.clean_copy_text(chat1, which=1, settings=settings)  # prompts only
+    copy_text = CopyService.clean_copy_text(chat1, which="prompts", settings=settings)
     assert "Hello" in copy_text
     assert "Hi there!" not in copy_text

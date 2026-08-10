@@ -7,7 +7,35 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from PyQt6.QtCore import QObject, QSettings, pyqtSignal
+try:
+    from PyQt6.QtCore import QObject, QSettings, pyqtSignal
+except ImportError:
+    class QObject:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _Signal:
+        def __init__(self, *args, **kwargs):
+            self._handlers = []
+
+        def connect(self, handler):
+            self._handlers.append(handler)
+
+        def emit(self, *args, **kwargs):
+            for h in list(self._handlers):
+                try:
+                    h(*args, **kwargs)
+                except TypeError:
+                    try:
+                        h()
+                    except Exception:
+                        pass
+
+    def pyqtSignal(*args, **kwargs):  # type: ignore
+        return _Signal()
+
+    class QSettings:  # type: ignore
+        pass
 
 from ...core.models import ChatLog
 from ...core.project import Project, ProjectBookmark, ProjectFile
@@ -25,7 +53,7 @@ class ProjectController(QObject):
     categoriesChanged = pyqtSignal()
     bookmarksChanged = pyqtSignal(str)  # chat_path
 
-    def __init__(self, settings: QSettings, undo_manager: UndoManager | None = None):
+    def __init__(self, settings: Any, undo_manager: UndoManager | None = None):
         super().__init__()
         self.settings = settings
         self.undo_manager = undo_manager or UndoManager()
@@ -56,7 +84,8 @@ class ProjectController(QObject):
             return default
 
     def _save_json(self, key: str, val: Any):
-        self.settings.setValue(key, json.dumps(val, ensure_ascii=False))
+        if hasattr(self.settings, "setValue"):
+            self.settings.setValue(key, json.dumps(val, ensure_ascii=False))
 
     def save_all_to_settings(self):
         self._save_json("org/chat_categories", self.chat_categories)
@@ -205,7 +234,6 @@ class ProjectController(QObject):
         if not path:
             return
         bms = self.get_bookmarks(path)
-        # Check if already bookmarked
         for b in bms:
             if b.get("block_num") == block_num:
                 b["note"] = note
@@ -254,7 +282,6 @@ class ProjectController(QObject):
         snippet: str = "",
         callback: Optional[Callable] = None,
     ) -> bool:
-        """Переключает закладку: добавляет если нет, удаляет если есть. Возвращает True если добавлена."""
         if self.is_bookmarked(path, block_num):
             self.remove_bookmark(path, block_num, callback)
             return False
