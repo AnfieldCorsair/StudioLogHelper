@@ -79,6 +79,10 @@ class ReaderBlock:
     is_bookmarked: bool = False
 
 
+# Alias for backward compatibility
+ReaderBlockCard = ReaderBlock
+
+
 class ReaderView(QWidget):
     """Высокопроизводительный книжный режим чтения."""
 
@@ -329,7 +333,6 @@ class ReaderView(QWidget):
                     self._tr("reader_block_info", cur=self._current_block_num, total=len(self.blocks))
                 )
         else:
-            # Безопасное открытие внешней ссылки в браузере ОС
             QDesktopServices.openUrl(url)
 
     def set_chat(self, chat: Optional[ChatLog]):
@@ -588,7 +591,6 @@ class ReaderView(QWidget):
         html_blocks.append("</div></body></html>")
         full_html = "".join(html_blocks)
 
-        # Мгновенная установка HTML без блокировки UI
         self.browser.setHtml(full_html)
         self.lbl_progress.setText(
             self._tr("reader_block_info", cur=self._current_block_num, total=len(self.blocks))
@@ -744,7 +746,6 @@ class ReaderView(QWidget):
             self._tr("reader_matches_n", cur=1, total=len(self._search_matches))
         )
         self.jump_to_block(self._search_matches[0])
-        # Direct highlight in document
         self.browser.find(query)
 
     def _next_search_match(self):
