@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
-"""MessageCard — оптимизированный, реиспользует QLabel, минимизирует перерисовку."""
+"""MessageCard — карточка сообщения с поддержкой закладок, размышлений, копирования и Markdown."""
 
 from __future__ import annotations
 
 import html as _html
 from pathlib import Path
+from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap, QIcon
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QFrame, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QToolButton, QMenu, QSizePolicy
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
 )
 
-from ...core.models import Message
 from ...core.markdown import markdown_to_html
+from ...core.models import Message, message_copy_text
 
 ASSET_DIR = Path(__file__).resolve().parents[3] / "assets" / "icons"
 LONG_PREVIEW = 5000
@@ -40,19 +48,42 @@ def load_pixmap(name: str, size: int = 18) -> QPixmap:
     if p.exists():
         pix = QPixmap(str(p))
         if not pix.isNull():
-            out = pix.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            out = pix.scaled(
+                size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
     _PIXMAP_CACHE[key] = out
     return out
 
 
 class MessageCard(QFrame):
-    def __init__(self, msg: Message, num: int, theme: dict, render_md: bool, show_thoughts: bool, status_cb, model_name: str = "", collapse_long: bool = True, preview_chars: int = LONG_PREVIEW, tr_func=None):
+    """Виджет карточки сообщения в ленте чата."""
+
+    def __init__(
+        self,
+        msg: Message,
+        num: int,
+        theme: dict,
+        render_md: bool,
+        show_thoughts: bool,
+        status_cb: Optional[Callable[[str], None]] = None,
+        model_name: str = "",
+        collapse_long: bool = True,
+        preview_chars: int = LONG_PREVIEW,
+        tr_func: Optional[Callable] = None,
+        is_bookmarked: bool = False,
+        bookmark_cb: Optional[Callable[[Message, int], None]] = None,
+    ):
         super().__init__()
         self.msg = msg
-        self._status = status_cb
+        self.num = num
+        self._status = status_cb or (lambda s: None)
         self._tr = tr_func or (lambda k, **kw: k)
         self._preview_chars = max(200, int(preview_chars or LONG_PREVIEW))
         self._auto_collapse = collapse_long
+        self._bookmark_cb = bookmark_cb
+        self._is_bookmarked = is_bookmarked
+        self._theme = theme
+
         self.setObjectName("msgCardUser" if msg.is_user else "msgCard")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -67,6 +98,7 @@ class MessageCard(QFrame):
             who = model_name or self._tr("model")
         if msg.role not in ("user", "model"):
             who = msg.role.upper()
+
         color = theme["user"] if msg.is_user else theme["model"]
         pix = load_pixmap("user.png" if msg.is_user else "model.png", 18)
         prefix = ""
@@ -76,19 +108,33 @@ class MessageCard(QFrame):
             hdr.addWidget(il)
         else:
             prefix = "👤 " if msg.is_user else "🤖 "
+
         lbl = QLabel(f"<b style='color:{color}'>#{num} {prefix}{_html.escape(who)}</b>")
         lbl.setTextFormat(Qt.TextFormat.RichText)
         hdr.addWidget(lbl)
+
         if msg.time_str():
             tl = QLabel(msg.time_str())
             tl.setObjectName("muted")
             hdr.addWidget(tl)
+
         if msg.token_count:
             tk = QLabel(f"{msg.token_count} {self._tr('tokens_short')}")
             tk.setObjectName("muted")
             hdr.addWidget(tk)
+
         hdr.addStretch(1)
 
+        # Bookmark button
+        self.btn_bm = QPushButton("🔖" if is_bookmarked else "☆")
+        self.btn_bm.setToolTip(self._tr("bookmark_toggle"))
+        self.btn_bm.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_bm.setFixedWidth(32)
+        self._update_bookmark_style()
+        self.btn_bm.clicked.connect(self._on_bookmark_clicked)
+        hdr.addWidget(self.btn_bm)
+
+        # Copy button
         btn = QPushButton(self._tr("copy"))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(self._copy)
@@ -121,7 +167,9 @@ class MessageCard(QFrame):
 
         for a in msg.attachments:
             al = QLabel(
-                f"📎 <a href='{_html.escape(a.url, quote=True)}'>{_html.escape(a.label_key)} (Drive)</a>" if a.url else f"📎 {_html.escape(a.label_key)}"
+                f"📎 <a href='{_html.escape(a.url, quote=True)}'>{_html.escape(a.label_key)} (Drive)</a>"
+                if a.url
+                else f"📎 {_html.escape(a.label_key)}"
             )
             al.setTextFormat(Qt.TextFormat.RichText)
             al.setOpenExternalLinks(True)
@@ -134,6 +182,7 @@ class MessageCard(QFrame):
         self._full_text = text
         self._rich = render_md and not msg.is_user
         self._collapsed = False
+
         if text:
             if self._auto_collapse and len(text) > self._preview_chars:
                 self._collapsed = True
@@ -145,14 +194,35 @@ class MessageCard(QFrame):
                 lay.addWidget(self._toggle_btn)
             else:
                 body = self._make_body(text, self._rich)
+                self._body = body
                 lay.addWidget(body)
         elif not msg.attachments and not msg.has_thoughts:
             e = QLabel(self._tr("empty_message"))
             e.setObjectName("muted")
             lay.addWidget(e)
 
+    def _update_bookmark_style(self):
+        bm_color = self._theme.get("bookmark", "#f57c00")
+        if self._is_bookmarked:
+            self.btn_bm.setText("🔖")
+            self.btn_bm.setStyleSheet(f"QPushButton {{ background: {bm_color}; color: #ffffff; font-weight: bold; border-radius: 6px; }}")
+        else:
+            self.btn_bm.setText("☆")
+            self.btn_bm.setStyleSheet("")
+
+    def set_bookmarked(self, bookmarked: bool):
+        self._is_bookmarked = bookmarked
+        self._update_bookmark_style()
+
+    def _on_bookmark_clicked(self):
+        if self._bookmark_cb:
+            self._bookmark_cb(self.msg, self.num)
+
     def _preview_text(self, text: str) -> str:
-        return text[: self._preview_chars].rstrip() + f"\n\n… {self._tr('collapsed_tail', n=len(text) - self._preview_chars)}"
+        return (
+            text[: self._preview_chars].rstrip()
+            + f"\n\n… {self._tr('collapsed_tail', n=len(text) - self._preview_chars)}"
+        )
 
     def _set_body_text(self, text: str, rich: bool):
         if self._body is None:
@@ -184,7 +254,9 @@ class MessageCard(QFrame):
     def _make_body(self, text: str, rich: bool) -> QLabel:
         body = QLabel()
         body.setWordWrap(True)
-        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
         body.setOpenExternalLinks(True)
         if rich:
             body.setTextFormat(Qt.TextFormat.RichText)
@@ -198,21 +270,15 @@ class MessageCard(QFrame):
 
     def _copy(self):
         from PyQt6.QtGui import QGuiApplication
-        from ...core.models import message_copy_text
-
         QGuiApplication.clipboard().setText(message_copy_text(self.msg, include_thoughts=False))
         self._status(self._tr("msg_copied"))
 
     def _copy_with_thoughts(self):
         from PyQt6.QtGui import QGuiApplication
-        from ...core.models import message_copy_text
-
         QGuiApplication.clipboard().setText(message_copy_text(self.msg, include_thoughts=True))
         self._status(self._tr("msg_copied"))
 
     def _copy_thoughts_only(self):
         from PyQt6.QtGui import QGuiApplication
-        from ...core.models import message_copy_text
-
         QGuiApplication.clipboard().setText(message_copy_text(self.msg, thoughts_only=True))
         self._status(self._tr("thoughts_copied"))

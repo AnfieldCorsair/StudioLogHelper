@@ -1,28 +1,116 @@
 # -*- coding: utf-8 -*-
-"""Темы + кэшированный QSS"""
+"""Темы интерфейса и режимов чтения + кэшированный QSS."""
 
 from __future__ import annotations
 
 from functools import lru_cache
-
 from PyQt6.QtGui import QPalette, QColor
 
 THEMES = {
     "dark": {
-        "bg": "#18191a", "panel": "#202122", "card": "#242526",
-        "card_user": "#1f2b3e", "text": "#e4e6eb", "muted": "#9a9da3",
-        "border": "#3e4042", "accent": "#8ab4f8", "user": "#8ab4f8",
-        "model": "#81c995", "thought": "#fdd663", "thought_bg": "#332b14",
-        "code_bg": "#1b1c1d", "btn": "#3a3b3c", "btn_text": "#e4e6eb",
-        "sel": "#2d4368", "accent_text": "#0b1325",
+        "bg": "#18191a",
+        "panel": "#202122",
+        "card": "#242526",
+        "card_user": "#1f2b3e",
+        "text": "#e4e6eb",
+        "muted": "#9a9da3",
+        "border": "#3e4042",
+        "accent": "#8ab4f8",
+        "user": "#8ab4f8",
+        "model": "#81c995",
+        "thought": "#fdd663",
+        "thought_bg": "#332b14",
+        "code_bg": "#1b1c1d",
+        "btn": "#3a3b3c",
+        "btn_text": "#e4e6eb",
+        "sel": "#2d4368",
+        "accent_text": "#0b1325",
+        "bookmark": "#ffb74d",
+        "name_ru": "Тёмная",
     },
     "light": {
-        "bg": "#f4f5f7", "panel": "#eceef1", "card": "#ffffff",
-        "card_user": "#e8f0fe", "text": "#1c1e21", "muted": "#65676b",
-        "border": "#d8dadf", "accent": "#1a73e8", "user": "#1a73e8",
-        "model": "#188038", "thought": "#b06000", "thought_bg": "#fef7e0",
-        "code_bg": "#f0f2f5", "btn": "#e4e6eb", "btn_text": "#1c1e21",
-        "sel": "#cfe0fc", "accent_text": "#ffffff",
+        "bg": "#f4f5f7",
+        "panel": "#eceef1",
+        "card": "#ffffff",
+        "card_user": "#e8f0fe",
+        "text": "#1c1e21",
+        "muted": "#65676b",
+        "border": "#d8dadf",
+        "accent": "#1a73e8",
+        "user": "#1a73e8",
+        "model": "#188038",
+        "thought": "#b06000",
+        "thought_bg": "#fef7e0",
+        "code_bg": "#f0f2f5",
+        "btn": "#e4e6eb",
+        "btn_text": "#1c1e21",
+        "sel": "#cfe0fc",
+        "accent_text": "#ffffff",
+        "bookmark": "#f57c00",
+        "name_ru": "Светлая",
+    },
+    "reading_warm": {
+        "bg": "#fdf6e3",
+        "panel": "#eee8d5",
+        "card": "#fbf1c7",
+        "card_user": "#e8e1cb",
+        "text": "#43525a",
+        "muted": "#839496",
+        "border": "#d5ceb8",
+        "accent": "#b58900",
+        "user": "#268bd2",
+        "model": "#2aa198",
+        "thought": "#cb4b16",
+        "thought_bg": "#faecc5",
+        "code_bg": "#eee8d5",
+        "btn": "#e6dec7",
+        "btn_text": "#43525a",
+        "sel": "#d8d1bc",
+        "accent_text": "#ffffff",
+        "bookmark": "#d33682",
+        "name_ru": "Тёплая бумага (Solarized)",
+    },
+    "reading_sepia": {
+        "bg": "#f4ecd8",
+        "panel": "#e6dcc1",
+        "card": "#fbf5e6",
+        "card_user": "#ece2ca",
+        "text": "#3c2f1f",
+        "muted": "#877662",
+        "border": "#d3c4a8",
+        "accent": "#8c5c36",
+        "user": "#3b5998",
+        "model": "#38761d",
+        "thought": "#99511b",
+        "thought_bg": "#ede0c2",
+        "code_bg": "#e8dfc7",
+        "btn": "#decfae",
+        "btn_text": "#3c2f1f",
+        "sel": "#d4c39e",
+        "accent_text": "#ffffff",
+        "bookmark": "#c0392b",
+        "name_ru": "Винтажная сепия",
+    },
+    "reading_dark": {
+        "bg": "#191a21",
+        "panel": "#21222c",
+        "card": "#282a36",
+        "card_user": "#1e2838",
+        "text": "#d0d3dc",
+        "muted": "#797c8d",
+        "border": "#3a3c4e",
+        "accent": "#7aa2f7",
+        "user": "#7aa2f7",
+        "model": "#73daca",
+        "thought": "#e0af68",
+        "thought_bg": "#2b271d",
+        "code_bg": "#1d1f27",
+        "btn": "#323544",
+        "btn_text": "#d0d3dc",
+        "sel": "#2a3d5e",
+        "accent_text": "#0b1325",
+        "bookmark": "#ff9e64",
+        "name_ru": "Ночное чтение (Soft OLED)",
     },
 }
 
@@ -85,13 +173,13 @@ def _build_stylesheet(t: dict, scale: float = 1.0) -> str:
     QScrollBar:horizontal {{ background: transparent; height: 12px; }}
     QScrollBar::handle:horizontal {{ background: {t['border']};
         border-radius: 5px; min-width: 30px; }}
-    QComboBox, QLineEdit {{
+    QComboBox, QLineEdit, QSpinBox {{
         background: {t['panel']}; border: 1px solid {t['border']};
-        border-radius: 6px; padding: 4px 8px;
+        border-radius: 6px; padding: 4px 8px; color: {t['text']};
     }}
     QComboBox QAbstractItemView {{
         background: {t['panel']}; border: 1px solid {t['border']};
-        selection-background-color: {t['sel']};
+        selection-background-color: {t['sel']}; color: {t['text']};
     }}
     QGroupBox {{
         border: 1px solid {t['border']}; border-radius: 8px;
@@ -103,7 +191,7 @@ def _build_stylesheet(t: dict, scale: float = 1.0) -> str:
         border-top: 1px solid {t['border']}; }}
     QMenu {{ background: {t['panel']}; border: 1px solid {t['border']};
         border-radius: 8px; padding: 4px; }}
-    QMenu::item {{ padding: 6px 22px; border-radius: 5px; }}
+    QMenu::item {{ padding: 6px 22px; border-radius: 5px; color: {t['text']}; }}
     QMenu::item:selected {{ background: {t['sel']}; }}
     QLabel#muted {{ color: {t['muted']}; }}
     QFrame#msgCard {{ background: {t['card']};
@@ -115,6 +203,10 @@ def _build_stylesheet(t: dict, scale: float = 1.0) -> str:
     QFrame#thoughtBox {{ background: {t['thought_bg']};
         border: 1px solid {t['border']}; border-radius: 8px; }}
     QFrame#thoughtBox QLabel {{ background: transparent; }}
+    QFrame#readerCard {{ background: {t['card']};
+        border: 1px solid {t['border']}; border-radius: 8px; }}
+    QFrame#readerToolbar {{ background: {t['panel']};
+        border-bottom: 1px solid {t['border']}; }}
     QMessageBox, QFileDialog, QInputDialog {{ background: {t['bg']}; }}
     QDialog QLabel, QMessageBox QLabel, QFileDialog QLabel {{ color: {t['text']}; background: transparent; }}
     QDialogButtonBox QPushButton {{ min-width: 88px; }}

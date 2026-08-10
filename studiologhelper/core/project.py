@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Project .slh.json manager с валидацией."""
+"""Project .slh.json manager с валидацией и поддержкой закладок/метаданных."""
 
 from __future__ import annotations
 
@@ -7,10 +7,43 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-
+from typing import Optional, List, Dict, Any
 
 SCHEMA = "studiologhelper.project.v2"
+
+
+@dataclass(slots=True)
+class ProjectBookmark:
+    block_num: int = 1
+    line: int = 0
+    role: str = ""
+    title: str = ""
+    note: str = ""
+    snippet: str = ""
+    created_at: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "block_num": self.block_num,
+            "line": self.line,
+            "role": self.role,
+            "title": self.title,
+            "note": self.note,
+            "snippet": self.snippet,
+            "created_at": self.created_at or datetime.now().isoformat(timespec="seconds"),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ProjectBookmark":
+        return cls(
+            block_num=int(d.get("block_num", 1)),
+            line=int(d.get("line", 0)),
+            role=str(d.get("role", "")),
+            title=str(d.get("title", "")),
+            note=str(d.get("note", "")),
+            snippet=str(d.get("snippet", "")),
+            created_at=str(d.get("created_at", "")),
+        )
 
 
 @dataclass(slots=True)
@@ -24,6 +57,43 @@ class ProjectFile:
     model: str = ""
     source_format: str = ""
     messages: int = 0
+    bookmarks: list[ProjectBookmark] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "category": self.category,
+            "note": self.note,
+            "tags": self.tags,
+            "derived_from": self.derived_from,
+            "title": self.title,
+            "model": self.model,
+            "source_format": self.source_format,
+            "messages": self.messages,
+            "bookmarks": [b.to_dict() for b in self.bookmarks],
+        }
+
+    @classmethod
+    def from_dict(cls, item: dict) -> "ProjectFile":
+        bms_raw = item.get("bookmarks") or []
+        bookmarks = []
+        if isinstance(bms_raw, list):
+            for b in bms_raw:
+                if isinstance(b, dict):
+                    bookmarks.append(ProjectBookmark.from_dict(b))
+
+        return cls(
+            path=item.get("path", ""),
+            category=item.get("category", ""),
+            note=item.get("note", ""),
+            tags=item.get("tags", []) if isinstance(item.get("tags"), list) else [],
+            derived_from=item.get("derived_from", ""),
+            title=item.get("title", ""),
+            model=item.get("model", ""),
+            source_format=item.get("source_format", ""),
+            messages=int(item.get("messages", 0)),
+            bookmarks=bookmarks,
+        )
 
 
 @dataclass(slots=True)
@@ -41,20 +111,7 @@ class Project:
             "created_or_saved_at": datetime.now().isoformat(timespec="seconds"),
             "project": {"name": self.name, "path": self.path},
             "categories": sorted(set(self.categories)),
-            "files": [
-                {
-                    "path": f.path,
-                    "category": f.category,
-                    "note": f.note,
-                    "tags": f.tags,
-                    "derived_from": f.derived_from,
-                    "title": f.title,
-                    "model": f.model,
-                    "source_format": f.source_format,
-                    "messages": f.messages,
-                }
-                for f in self.files
-            ],
+            "files": [f.to_dict() for f in self.files],
             "parser": self.parser_options,
         }
 
@@ -70,19 +127,8 @@ class Project:
             p = item.get("path", "")
             if not p:
                 continue
-            files.append(
-                ProjectFile(
-                    path=p,
-                    category=item.get("category", ""),
-                    note=item.get("note", ""),
-                    tags=item.get("tags", []) if isinstance(item.get("tags"), list) else [],
-                    derived_from=item.get("derived_from", ""),
-                    title=item.get("title", ""),
-                    model=item.get("model", ""),
-                    source_format=item.get("source_format", ""),
-                    messages=item.get("messages", 0),
-                )
-            )
+            files.append(ProjectFile.from_dict(item))
+
         return cls(
             name=proj_meta.get("name", ""),
             path=file_path or proj_meta.get("path", ""),

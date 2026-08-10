@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Быстрый поиск в RAM по уже загруженным чатам — ripgrep-like."""
+"""Быстрый поиск в RAM по уже загруженным чатам — ripgrep-like + стемминг/морфология."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from ..core.models import ChatLog
+from .stemmer import match_stemmed_query
 
 
 @dataclass
@@ -20,13 +21,20 @@ class MemoryHit:
     role: str
     is_thought: bool
     snippet: str
-    score: int  # lower is better? or count
+    score: int
 
 
-def _plain_snippet(text: str, q: str, limit: int = 220) -> str:
+def _plain_snippet(text: str, q: str, limit: int = 220, match_spans: List[Tuple[int, int]] | None = None) -> str:
     one = re.sub(r"\s+", " ", text).strip()
     if not one:
         return ""
+    if match_spans and len(match_spans) > 0:
+        pos, end = match_spans[0]
+        a = max(0, pos - 70)
+        b = min(len(text), end + 140)
+        frag = text[a:b].replace("\n", " ").strip()
+        return ("…" if a > 0 else "") + frag + ("…" if b < len(text) else "")
+
     pos = one.lower().find(q.lower())
     if pos < 0:
         return one[:limit] + ("…" if len(one) > limit else "")
@@ -36,10 +44,11 @@ def _plain_snippet(text: str, q: str, limit: int = 220) -> str:
 
 
 def _search_one_chat(args) -> List[MemoryHit]:
-    chat, q_lower, q_original, scope = args
+    chat, q_original, scope, use_stemming = args
     hits: List[MemoryHit] = []
+    q_lower = q_original.lower()
+
     for num, msg in enumerate(chat.messages, 1):
-        # scope filter
         candidates = []
         if scope in ("all", "user") and msg.is_user and msg.text:
             candidates.append((msg.text, "user", False))
@@ -53,7 +62,9 @@ def _search_one_chat(args) -> List[MemoryHit]:
                 candidates.append((t, "model", True))
 
         for text, role, is_thought in candidates:
+            # 1. Прямой быстрый поиск
             if q_lower in text.lower():
+                score = text.lower().count(q_lower) * 5
                 hits.append(
                     MemoryHit(
                         chat_path=chat.path,
@@ -63,40 +74,64 @@ def _search_one_chat(args) -> List[MemoryHit]:
                         role=role,
                         is_thought=is_thought,
                         snippet=_plain_snippet(text, q_original),
-                        score=text.lower().count(q_lower),
+                        score=score,
                     )
                 )
-                break  # one hit per message
+                break
+            # 2. Если прямой не найден и включён стемминг/морфология
+            elif use_stemming:
+                matched, score, spans = match_stemmed_query(q_original, text)
+                if matched:
+                    hits.append(
+                        MemoryHit(
+                            chat_path=chat.path,
+                            chat_title=chat.title,
+                            model=chat.model,
+                            msg_num=num,
+                            role=role,
+                            is_thought=is_thought,
+                            snippet=_plain_snippet(text, q_original, match_spans=spans),
+                            score=score,
+                        )
+                    )
+                    break
+
     return hits
 
 
-def fast_search_chats(chats: List[ChatLog], query: str, scope: str = "all", max_workers: int = 4, limit: int = 300) -> List[MemoryHit]:
-    """Параллельный поиск по загруженным чатам."""
+def fast_search_chats(
+    chats: List[ChatLog],
+    query: str,
+    scope: str = "all",
+    max_workers: int = 4,
+    limit: int = 300,
+    use_stemming: bool = True,
+) -> List[MemoryHit]:
+    """Параллельный поиск по загруженным чатам с поддержкой стемминга и словоформ."""
     if not query.strip():
         return []
-    q_lower = query.lower()
-    q_original = query
+    q_original = query.strip()
 
-    # Если чатов мало, не используем потоки
     if len(chats) <= 4 or max_workers <= 1:
         all_hits: List[MemoryHit] = []
         for chat in chats:
-            all_hits.extend(_search_one_chat((chat, q_lower, q_original, scope)))
+            all_hits.extend(_search_one_chat((chat, q_original, scope, use_stemming)))
             if len(all_hits) >= limit:
                 break
-        # sort by score desc
         all_hits.sort(key=lambda h: h.score, reverse=True)
         return all_hits[:limit]
 
-    # Parallel
     all_hits = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_search_one_chat, (chat, q_lower, q_original, scope)) for chat in chats]
+        futures = [
+            ex.submit(_search_one_chat, (chat, q_original, scope, use_stemming))
+            for chat in chats
+        ]
         for fut in futures:
             try:
                 hits = fut.result()
                 all_hits.extend(hits)
-                if len(all_hits) >= limit * 2:  # early stop a bit over
+                if len(all_hits) >= limit * 2:
                     break
             except Exception:
                 continue
@@ -105,12 +140,10 @@ def fast_search_chats(chats: List[ChatLog], query: str, scope: str = "all", max_
     return all_hits[:limit]
 
 
-# Optional: regex search with Aho-Corasick if many queries
 def regex_search_chats(chats: List[ChatLog], pattern: str, scope: str = "all") -> List[MemoryHit]:
     try:
         reg = re.compile(pattern, re.IGNORECASE)
     except re.error:
-        # fallback to plain
         return fast_search_chats(chats, pattern, scope)
 
     hits: List[MemoryHit] = []
@@ -128,6 +161,17 @@ def regex_search_chats(chats: List[ChatLog], pattern: str, scope: str = "all") -
                 if reg.search(text):
                     m = reg.search(text)
                     snippet = _plain_snippet(text, m.group(0) if m else text[:20])
-                    hits.append(MemoryHit(chat_path=chat.path, chat_title=chat.title, model=chat.model, msg_num=num, role=role, is_thought=is_thought, snippet=snippet, score=1))
+                    hits.append(
+                        MemoryHit(
+                            chat_path=chat.path,
+                            chat_title=chat.title,
+                            model=chat.model,
+                            msg_num=num,
+                            role=role,
+                            is_thought=is_thought,
+                            snippet=snippet,
+                            score=1,
+                        )
+                    )
                     break
     return hits
