@@ -6,3 +6,5 @@ markdown>=3.6
 # For tests
 pytest>=8
 pytest-qt>=4.4
+# Streaming JSON parser dependency
+ijson>=3.1

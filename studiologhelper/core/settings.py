@@ -75,7 +75,7 @@ if HAS_PYDANTIC:
         ui: UISettings = Field(default_factory=UISettings)
         parser: TextParseSettings = Field(default_factory=TextParseSettings)
         export: ExportSettings = Field(default_factory=ExportSettings)
-        copy: CopySettings = Field(default_factory=CopySettings)
+        copy_settings: CopySettings = Field(default_factory=CopySettings)
         index: IndexSettings = Field(default_factory=IndexSettings)
         recent_projects: List[str] = Field(default_factory=list)
         project_name: str = ""
@@ -135,7 +135,7 @@ else:
             self.ui = kw.get("ui") or UISettings()
             self.parser = kw.get("parser") or TextParseSettings()
             self.export = kw.get("export") or ExportSettings()
-            self.copy = kw.get("copy") or CopySettings()
+            self.copy_settings = kw.get("copy_settings") or kw.get("copy") or CopySettings()
             self.index = kw.get("index") or IndexSettings()
             self.recent_projects = kw.get("recent_projects", [])
             self.project_name = kw.get("project_name", "")
@@ -147,7 +147,7 @@ else:
                 "ui": self.ui.model_dump() if hasattr(self.ui, 'model_dump') else (self.ui.__dict__ if hasattr(self.ui, '__dict__') else {}),
                 "parser": self.parser.model_dump() if hasattr(self.parser, 'model_dump') else (self.parser.__dict__ if hasattr(self.parser, '__dict__') else {}),
                 "export": self.export.model_dump() if hasattr(self.export, 'model_dump') else (self.export.__dict__ if hasattr(self.export, '__dict__') else {}),
-                "copy": self.copy.model_dump() if hasattr(self.copy, 'model_dump') else (self.copy.__dict__ if hasattr(self.copy, '__dict__') else {}),
+                "copy_settings": self.copy_settings.model_dump() if hasattr(self.copy_settings, 'model_dump') else (self.copy_settings.__dict__ if hasattr(self.copy_settings, '__dict__') else {}),
                 "index": self.index.model_dump() if hasattr(self.index, 'model_dump') else (self.index.__dict__ if hasattr(self.index, '__dict__') else {}),
                 "recent_projects": self.recent_projects,
                 "project_name": self.project_name,
