@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "studiologhelper"
-version = "2.1.0"
-description = "Desktop (PyQt6) and CLI helper for Google AI Studio logs, Arena AI logs, and clean reading/exporting"
+version = "1.1.0"
+description = "StudioLogHelper - Pre-Release 1.1 (PyQt6 + CLI for Google AI Studio logs, Arena AI logs, and Book Reader)"
 readme = "README.md"
 authors = [
     { name = "StudioLogHelper Team" }
@@ -57,6 +57,11 @@ slh = "studiologhelper.cli.commands:main"
 
 [tool.setuptools.packages.find]
 include = ["studiologhelper*"]
+
+[tool.setuptools.package-data]
+studiologhelper = [
+    "assets/icons/*.png",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

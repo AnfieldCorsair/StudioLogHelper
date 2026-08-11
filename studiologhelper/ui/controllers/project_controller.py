@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -100,12 +99,10 @@ class ProjectController(QObject):
         self._cached_chats_ref: List[ChatLog] = []
         self._last_saved_file_count: int = 0
         self._active_save_worker: Optional[SaveProjectWorker] = None
+        self._is_saving: bool = False
+        self._pending_snapshot: Optional[Tuple[Project, str]] = None
 
-        # Debounce Timer для неблокирующего автосохранения
-        self._autosave_timer = QTimer()
-        self._autosave_timer.setSingleShot(True)
-        self._autosave_timer.timeout.connect(self._do_debounced_autosave)
-
+        # Инициализация всех полей ДО вызова миграции QSettings
         self.chat_categories: Dict[str, str] = self._load_json("org/chat_categories", {})
         self.chat_notes: Dict[str, str] = self._load_json("org/chat_notes", {})
         self.chat_tags: Dict[str, List[str]] = self._load_json("org/chat_tags", {})
@@ -113,13 +110,17 @@ class ProjectController(QObject):
         self.chat_bookmarks: Dict[str, List[Dict[str, Any]]] = self._load_json("org/chat_bookmarks", {})
         self.chat_highlights: Dict[str, List[Dict[str, Any]]] = self._load_json("org/chat_highlights", {})
         self.categories: Set[str] = set(v for v in self.chat_categories.values() if v)
-
-        # Одноразовая миграция старых записей из QSettings
-        self._migrate_qsettings_highlights()
-
         self.recent_projects: List[str] = [
             x for x in self._load_json("org/recent_projects", []) if isinstance(x, str)
         ]
+
+        # Одноразовая безопасная миграция старых записей из QSettings
+        self._migrate_qsettings_highlights()
+
+        # Debounce Timer для неблокирующего автосохранения
+        self._autosave_timer = QTimer()
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.timeout.connect(self._do_debounced_autosave)
 
     def _migrate_qsettings_highlights(self):
         """Мигрирует закладки, содержащие цитаты, из chat_bookmarks в chat_highlights."""
@@ -176,7 +177,7 @@ class ProjectController(QObject):
     def set_active_chats_ref(self, chats: List[ChatLog]):
         self._cached_chats_ref = chats
 
-    # ---- Autosave с Debounce и неблокирующим фоновым воркером ----
+    # ---- Autosave с Debounce и сериализованным неблокирующим воркером ----
     def trigger_autosave(self):
         """Планирует неблокирующее автосохранение с debounce, защищая от фризов GUI."""
         if not self.auto_save_enabled:
@@ -197,21 +198,39 @@ class ProjectController(QObject):
                 logger.warning("Autosave skipped: chat list is temporarily empty during transition")
                 return
 
-            # Создаём мгновенный снимок в памяти и передаём на асинхронную запись в воркер
             snapshot = self.create_project_snapshot(name=self.current_project_name, path=self.current_project_path)
             target_path = self.current_project_path
 
-            def on_saved(saved_path):
-                self.dirty = False
-                self.autoSaved.emit(saved_path)
+            # Сериализация фоновых записей: если воркер уже занят, ставим снимок в очередь
+            if self._is_saving:
+                self._pending_snapshot = (snapshot, target_path)
+                return
 
-            def on_error(saved_path, err):
-                logger.error("Autosave error on %s: %s", saved_path, err)
+            self._start_save_worker(snapshot, target_path)
 
-            self._active_save_worker = SaveProjectWorker(snapshot, target_path)
-            self._active_save_worker.savedDone.connect(on_saved)
-            self._active_save_worker.savedError.connect(on_error)
-            self._active_save_worker.start()
+    def _start_save_worker(self, snapshot: Project, target_path: str):
+        self._is_saving = True
+        self._active_save_worker = SaveProjectWorker(snapshot, target_path)
+
+        def on_saved(saved_path):
+            self.dirty = False
+            self.autoSaved.emit(saved_path)
+            self._handle_save_finished()
+
+        def on_error(saved_path, err):
+            logger.error("Autosave error on %s: %s", saved_path, err)
+            self._handle_save_finished()
+
+        self._active_save_worker.savedDone.connect(on_saved)
+        self._active_save_worker.savedError.connect(on_error)
+        self._active_save_worker.start()
+
+    def _handle_save_finished(self):
+        self._is_saving = False
+        if self._pending_snapshot:
+            next_snap, next_path = self._pending_snapshot
+            self._pending_snapshot = None
+            self._start_save_worker(next_snap, next_path)
 
     # ---- Hierarchical Categories ----
     def get_hierarchical_categories(self) -> List[Tuple[str, int, str]]:

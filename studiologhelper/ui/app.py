@@ -7,12 +7,17 @@ from pathlib import Path
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
 
+from ..core.plugins import set_safe_mode
+from ..core.scanner import scan_folder
 from .main_window import MainWindow
 from .widgets.message_card import load_icon
-from ..core.scanner import scan_folder
 
 
 def main():
+    # Проверяем флаги безопасного режима до запуска GUI
+    if any(arg in ("--safe-mode", "--disable-plugins") for arg in sys.argv[1:]):
+        set_safe_mode(True)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     ic = load_icon("app_logo.png")
@@ -28,7 +33,9 @@ def main():
     win = MainWindow()
     win.show()
 
-    args = [a for a in sys.argv[1:] if Path(a).exists()]
+    # Фильтруем аргументы путей к файлам/папкам
+    raw_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    args = [a for a in raw_args if Path(a).exists()]
     files = []
     for a in args:
         p = Path(a)

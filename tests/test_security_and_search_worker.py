@@ -29,10 +29,15 @@ def test_html_and_xss_sanitization():
     assert "onmouseover" not in clean_attr
     assert "Content" in clean_attr
 
-    # 4. Strip javascript: URLs
+    # 4. Strip javascript: URLs and entity-encoded javascript
     dirty_js_link = '<a href="javascript:alert(1)">Click me</a>'
     clean_js_link = sanitize_html(dirty_js_link)
     assert "javascript:" not in clean_js_link
+
+    # Entity-encoded javascript:
+    dirty_encoded = '<a href="jav&#x61;script:alert(1)">Encoded</a>'
+    clean_encoded = sanitize_html(dirty_encoded)
+    assert "jav&#x61;script" not in clean_encoded and "alert(1)" not in clean_encoded
 
     # 5. Add rel="noopener noreferrer" to external links
     ext_link = '<a href="https://example.com">Example</a>'
@@ -46,13 +51,16 @@ def test_url_safety_check():
     assert is_safe_url("mailto:user@example.com") is True
     assert is_safe_url("#block_1") is True
 
-    # Dangerous URLs
+    # Dangerous URLs (raw and entity-encoded)
     assert is_safe_url("javascript:alert(1)") is False
+    assert is_safe_url("jav&#x61;script:alert(1)") is False
+    assert is_safe_url("%6a%61%76%61%73%63%72%69%70%74%3aalert(1)") is False
     assert is_safe_url("vbscript:msgbox(1)") is False
     assert is_safe_url("data:text/html,<script>alert(1)</script>") is False
     assert is_safe_url("file:///etc/passwd") is False
 
     assert sanitize_url("javascript:alert(1)") == "#"
+    assert sanitize_url("jav&#x61;script:alert(1)") == "#"
     assert sanitize_url("https://google.com") == "https://google.com"
 
 
@@ -64,13 +72,11 @@ def test_plugin_safe_mode(tmp_path):
 
     registry = PluginRegistry()
 
-    # 1. When safe mode is enabled, directory loading is skipped
     set_safe_mode(True)
     assert is_safe_mode() is True
     registry.load_from_directory(plugin_dir)
     assert len(registry.loaded_plugin_files) == 0
 
-    # 2. Reset safe mode
     set_safe_mode(False)
     assert is_safe_mode() is False
 
@@ -97,7 +103,6 @@ def test_search_worker_execution_and_abort():
     assert len(results) >= 1
     assert results[0].msg_num in (1, 2)
 
-    # Test abort cancellation
     worker_abort = SearchWorker(mode="hybrid_chats", query="test", chats=[chat])
     worker_abort.abort()
     assert worker_abort._abort is True

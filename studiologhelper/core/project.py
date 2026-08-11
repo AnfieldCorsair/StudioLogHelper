@@ -33,7 +33,7 @@ def compute_text_hash(text: str) -> str:
 
 @dataclass(slots=True)
 class Highlight:
-    """Выделенная маркером цитата с точными границами и стабильным UUID."""
+    """Выделенная маркером цитата с точными границами, хэшем источника и стабильным UUID."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     block_num: int = 1
@@ -152,19 +152,20 @@ class ProjectFile:
         bookmarks: list[ProjectBookmark] = []
         highlights: list[Highlight] = []
 
-        # Обработка закладок и обратная совместимость со старыми записями
         if isinstance(bms_raw, list):
             for b in bms_raw:
                 if isinstance(b, dict):
-                    # Если в старой закладке была цитата — мигрируем её в Highlight
                     if b.get("quote"):
                         highlights.append(
                             Highlight(
                                 id=str(b.get("id") or uuid.uuid4()),
                                 block_num=int(b.get("block_num", 1)),
+                                start=int(b.get("start", 0)),
+                                end=int(b.get("end", 0)),
                                 quote=str(b.get("quote", "")),
                                 color=str(b.get("color", "yellow")),
                                 note=str(b.get("note", "")),
+                                source_text_hash=str(b.get("source_text_hash", "")),
                                 created_at=str(b.get("created_at") or ""),
                             )
                         )
@@ -179,7 +180,6 @@ class ProjectFile:
         raw_path = item.get("path", "")
         rel_path = item.get("rel_path", "")
 
-        # Разрешение пути: если абсолютный путь не существует, но есть base_dir + rel_path
         resolved_path = raw_path
         if base_dir and rel_path:
             candidate = (base_dir / rel_path).resolve()
@@ -203,10 +203,7 @@ class ProjectFile:
 
 
 def matches_hierarchical_category(item_cat: str, filter_cat: str) -> bool:
-    """
-    Проверяет вхождение категории в иерархический фильтр.
-    Если filter_cat == "Work", подходит "Work", "Work/Research", "Work/Research/Gemini".
-    """
+    """Проверяет вхождение категории в иерархический фильтр."""
     if not filter_cat:
         return True
     if filter_cat == "__none__":
@@ -261,7 +258,6 @@ class Project:
                 continue
             files.append(ProjectFile.from_dict(item, base_dir=base_dir))
 
-        # Обратная совместимость с датами
         created_at = data.get("created_at") or data.get("created_or_saved_at") or datetime.now().isoformat(timespec="seconds")
         updated_at = data.get("updated_at") or data.get("created_or_saved_at") or datetime.now().isoformat(timespec="seconds")
 
@@ -277,29 +273,24 @@ class Project:
 
     def save(self, path: Path | str, create_backup: bool = True):
         """
-        Атомарное сохранение проекта:
-        1. Рассчитывает относительные пути rel_path для файлов проекта.
-        2. Пишет во временный файл .tmp в том же каталоге с fsync.
-        3. Ротирует существующий файл в .bak при необходимости.
-        4. Заменяет целевой файл атомарно через os.replace.
+        Атомарное сохранение проекта с уникальным временным файлом и fsync.
         """
         p = Path(path).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
         self.path = str(p)
         self.updated_at = datetime.now().isoformat(timespec="seconds")
 
-        # Пересчитываем rel_path для мобильности файлов
         proj_dir = p.parent
         for f in self.files:
             try:
                 f_path = Path(f.path).resolve()
                 f.rel_path = str(f_path.relative_to(proj_dir))
             except (ValueError, Exception):
-                # Файл на другом диске или вне каталога проекта
                 f.rel_path = ""
 
         payload = json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
-        tmp_path = p.with_suffix(p.suffix + f".tmp_{os.getpid()}")
+        # Уникальный временный файл для защиты от гонок потоков
+        tmp_path = p.with_suffix(p.suffix + f".tmp_{uuid.uuid4().hex[:8]}")
         bak_path = p.with_suffix(p.suffix + ".bak")
 
         try:
@@ -308,14 +299,12 @@ class Project:
                 f.flush()
                 os.fsync(f.fileno())
 
-            # Создаём резервную копию предыдущей версии перед заменой
             if p.exists() and create_backup:
                 try:
                     shutil.copy2(p, bak_path)
                 except Exception:
                     pass
 
-            # Атомарная замена файла
             os.replace(tmp_path, p)
         finally:
             if tmp_path.exists():

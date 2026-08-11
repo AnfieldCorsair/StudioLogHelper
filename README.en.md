@@ -1,4 +1,4 @@
-# StudioLogHelper 2.1.0 (PyQt6)
+# StudioLogHelper - Pre-Release 1.1 (PyQt6)
 
 Desktop application and CLI utility for parsing, reading, searching, and exporting AI chat logs from **Google AI Studio** (including extensionless JSON files downloaded from Google Drive), **Arena AI plain-text exports**, and cleaned TXT/MD logs.
 
@@ -18,25 +18,26 @@ Desktop application and CLI utility for parsing, reading, searching, and exporti
 
 ### 🖍 Interactive Quotes & Highlighter
 - Select text with the cursor and highlight with colored markers: 🟡 **Yellow**, 🟢 **Green**, 🌸 **Pink**, 🔵 **Blue**.
+- Accurate `(start, end)` boundary preservation and source text hash validation.
 - Attach custom user notes to quotes and bookmarks (`Ctrl+B`).
 - Saved in `.slh.json` project metadata with one-click Markdown summary export.
 
-### 🔎 Hybrid Search Engine (FTS5 + Stemming + Local Embeddings)
+### 🔎 Fuzzy & Hybrid Search Engine (FTS5 + Stemming + Character N-grams)
 - **Lexical Index:** Fast SQLite FTS5 (BM25) over indexed folders.
 - **Morphological Stemmer (RU/EN):** Porter stemmer matches inflected word forms (searching for `cooking` finds `cook`, `cooked`, `cooks`; Russian `сковородка` finds `сковорода`, `сковороду`, `сковороде`).
-- **Subword Dense Embeddings:** Local n-gram cosine similarity provides typo-tolerant ranking without heavy external AI dependencies.
+- **Local N-gram Vectorizer:** LRU-cached cosine similarity provides typo-tolerant ranking without heavy external AI dependencies.
 - **Asynchronous Non-blocking Worker:** Background query execution with real-time cancellation of obsolete searches and input debouncing.
 
-### 🗃 Hierarchical Categories & Auto-save
+### 🗃 Hierarchical Categories & Non-blocking Auto-save
 - **Nested Categories:** Support for subcategories such as `Work/Research/Gemini`, `Work/Code`, `Personal/Notes` with subtree filtering.
-- **Atomic Project Auto-save:** Non-blocking debounced saving via temporary files and `fsync` with automatic `.bak` backups.
+- **Atomic Background Auto-save (`SaveProjectWorker`):** Truly non-blocking debounced saving in a separate thread via temporary files and `fsync` with automatic `.bak` backups.
 - **Project Portability:** Relative path resolution (`rel_path`) allows copying project directories across computers without losing linked files.
 - **Undo / Redo:** Multi-level command stack (`Ctrl+Z` / `Ctrl+Y`).
 
 ### 🛡 Security & Plugins
-- **HTML Sanitization:** Built-in XSS protection, stripping of dangerous tags and `javascript:` protocols.
+- **HTML Sanitization:** Built-in XSS protection, entity decoding, and stripping of dangerous tags and `javascript:` protocols.
 - **Safe External Links:** Automatic injection of `rel="noopener noreferrer"`.
-- **Plugin Safe Mode:** Safe mode flag `--safe-mode` / `--disable-plugins` to prevent loading arbitrary third-party code. Experimental parsers for other formats are isolated as plugins.
+- **Plugin Safe Mode:** Safe mode flag `--safe-mode` / `--disable-plugins` in GUI and CLI to prevent loading arbitrary third-party code.
 
 ---
 

@@ -23,18 +23,30 @@ from PyQt6.QtWidgets import (
 from ...core.markdown import markdown_to_html
 from ...core.models import Message, message_copy_text
 
-ASSET_DIR = Path(__file__).resolve().parents[3] / "assets" / "icons"
+# Поиск иконок внутри пакета и в корневом каталоге assets
+_PACKAGE_ASSET_DIR = Path(__file__).resolve().parents[2] / "assets" / "icons"
+_ROOT_ASSET_DIR = Path(__file__).resolve().parents[3] / "assets" / "icons"
 LONG_PREVIEW = 5000
 
 _ICON_CACHE = {}
 _PIXMAP_CACHE = {}
 
 
+def _resolve_icon_path(name: str) -> Optional[Path]:
+    p1 = _PACKAGE_ASSET_DIR / name
+    if p1.exists():
+        return p1
+    p2 = _ROOT_ASSET_DIR / name
+    if p2.exists():
+        return p2
+    return None
+
+
 def load_icon(name: str) -> QIcon:
     if name in _ICON_CACHE:
         return _ICON_CACHE[name]
-    p = ASSET_DIR / name
-    ic = QIcon(str(p)) if p.exists() else QIcon()
+    p = _resolve_icon_path(name)
+    ic = QIcon(str(p)) if p and p.exists() else QIcon()
     _ICON_CACHE[name] = ic
     return ic
 
@@ -43,9 +55,9 @@ def load_pixmap(name: str, size: int = 18) -> QPixmap:
     key = (name, size)
     if key in _PIXMAP_CACHE:
         return _PIXMAP_CACHE[key]
-    p = ASSET_DIR / name
+    p = _resolve_icon_path(name)
     out = QPixmap()
-    if p.exists():
+    if p and p.exists():
         pix = QPixmap(str(p))
         if not pix.isNull():
             out = pix.scaled(

@@ -2,6 +2,7 @@
 """Regression tests for P0/P1 fixes: Atomic save, backup rotation, autosave safety, bookmark/highlight coexistence, and snippet accuracy."""
 
 import json
+import uuid
 from pathlib import Path
 
 from studiologhelper.core.models import ChatLog, Message
@@ -25,6 +26,48 @@ class MockSettings:
 
     def setValue(self, key, val):
         self._data[key] = val
+
+
+def test_qsettings_legacy_migration_safety():
+    settings = MockSettings()
+    old_bookmarks = [
+        {"id": "bm1", "block_num": 1, "note": "Plain bookmark"},
+        {"id": "hl1", "block_num": 2, "quote": "старая цитата", "color": "yellow", "note": "Заметка цитаты"},
+    ]
+    settings.setValue("org/chat_bookmarks", json.dumps({"/tmp/chat.json": old_bookmarks}))
+
+    proj_ctrl = ProjectController(settings)
+    assert len(proj_ctrl.chat_bookmarks["/tmp/chat.json"]) == 1
+    assert proj_ctrl.chat_bookmarks["/tmp/chat.json"][0]["id"] == "bm1"
+
+    assert len(proj_ctrl.chat_highlights["/tmp/chat.json"]) == 1
+    assert proj_ctrl.chat_highlights["/tmp/chat.json"][0]["quote"] == "старая цитата"
+
+
+def test_two_identical_quotes_no_nested_marks():
+    try:
+        from studiologhelper.ui.widgets.reader_view import ReaderView
+    except ImportError:
+        return  # Headless environment without PyQt6
+
+    text = "Первое слово сковорода и второе слово сковорода в одном предложении."
+    quote = "сковорода"
+    pos1 = text.find(quote)
+    pos2 = text.find(quote, pos1 + 1)
+
+    hls = [
+        {"id": "1", "block_num": 1, "quote": quote, "start": pos1, "end": pos1 + len(quote), "color": "yellow", "note": "Цитата 1"},
+        {"id": "2", "block_num": 1, "quote": quote, "start": pos2, "end": pos2 + len(quote), "color": "green", "note": "Цитата 2"},
+    ]
+
+    settings = MockSettings()
+    proj_ctrl = ProjectController(settings)
+    reader = ReaderView(settings, proj_ctrl, lambda k, **kw: k)
+
+    res_plain = reader._apply_highlights_to_text(text, hls, is_markdown=False)
+    assert "<mark" in res_plain
+    assert res_plain.count("<mark") == 2
+    assert res_plain.count("</mark>") == 2
 
 
 def test_atomic_save_and_backup_creation(tmp_path):
@@ -62,11 +105,9 @@ def test_project_portability_with_relative_paths(tmp_path):
     proj = Project(name="PortabilityTest", files=[ProjectFile(path=str(log_file), title="Chat 1")])
     proj.save(proj_path)
 
-    # Check relative path in saved JSON
     data = json.loads(proj_path.read_text(encoding="utf-8"))
     assert data["files"][0]["rel_path"] == "logs/chat1.txt" or data["files"][0]["rel_path"] == "logs\\chat1.txt"
 
-    # Move entire directory to a new location to test portability
     new_dir = tmp_path / "moved_dir"
     new_dir.mkdir()
     new_logs = new_dir / "logs"
@@ -132,15 +173,12 @@ def test_autosave_protection_against_empty_cache(tmp_path):
     proj_ctrl.save_project(proj_path, [chat], name="AutosaveTest")
     assert proj_path.exists()
 
-    # Simulate list temporary clearing during reload
     proj_ctrl.set_active_chats_ref([])
     proj_ctrl.is_loading = True
 
-    # Triggering autosave during loading must be ignored
     proj_ctrl.trigger_autosave()
     assert proj_ctrl.dirty is False or proj_ctrl.is_loading is True
 
-    # Check project file was NOT emptied
     data = json.loads(proj_path.read_text(encoding="utf-8"))
     assert len(data["files"]) == 1
 
@@ -153,5 +191,4 @@ def test_snippet_extraction_no_offset_drift():
 
     snippet = build_snippet(text, spans)
     assert "сковорода" in snippet
-    # No multiple newlines in snippet
     assert "\n\n" not in snippet
