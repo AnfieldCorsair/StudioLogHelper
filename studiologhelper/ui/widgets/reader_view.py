@@ -1,14 +1,5 @@
 # -*- coding: utf-8 -*-
-"""reader_view.py — Высокопроизводительный режим чтения («Книга») с маркерами/цитатами.
-
-Возможности:
-  - Интерактивное выделение цитат маркером (🟡 Жёлтый, 🟢 Зелёный, 🌸 Розовый, 🔵 Голубой)
-  - Сохранение цитат и заметок в проект .slh.json
-  - Аппаратно-ускоренный рендеринг через единый QTextBrowser с книжным CSS
-  - Палитры длительного чтения: Тёплая бумага (#fdf6e3), Винтажная сепия (#f4ecd8), Soft OLED (#191a21)
-  - Адаптивное масштабирование кнопок и шрифта без перекосов интерфейса
-  - Умный поиск по смыслу и словоформам
-"""
+"""reader_view.py — Высокопроизводительный режим чтения («Книга») с маркерами/цитатами."""
 
 from __future__ import annotations
 
@@ -79,10 +70,10 @@ class ReaderBlock:
     token_count: int = 0
     attachments: List[str] = field(default_factory=list)
     is_bookmarked: bool = False
-    highlights: List[Dict[str, str]] = field(default_factory=list)  # list of {quote, color, note}
+    highlights: List[Dict[str, Any]] = field(default_factory=list)
 
 
-ReaderBlockCard = ReaderBlock  # Alias
+ReaderBlockCard = ReaderBlock  # Alias for backward compatibility
 
 
 class ReaderView(QWidget):
@@ -135,7 +126,7 @@ class ReaderView(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # 1. Top Reading Toolbar (Адаптивные размеры, без фиксированной обрезки)
+        # 1. Top Reading Toolbar
         tb = QFrame()
         tb.setObjectName("readerToolbar")
         tb.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -148,8 +139,7 @@ class ReaderView(QWidget):
         b_open_ext.clicked.connect(self.open_external_file)
         tbl.addWidget(b_open_ext)
 
-        lbl_thm = QLabel(self._tr("reader_theme"))
-        tbl.addWidget(lbl_thm)
+        tbl.addWidget(QLabel(self._tr("reader_theme")))
         self.cmb_theme = QComboBox()
         self.cmb_theme.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.cmb_theme.addItem("📜 Тёплая бумага (Solarized)", "reading_warm")
@@ -173,7 +163,6 @@ class ReaderView(QWidget):
         self.cmb_font.currentIndexChanged.connect(self._on_font_changed)
         tbl.addWidget(self.cmb_font)
 
-        # Масштаб шрифта
         b_fs_dec = QPushButton("A−")
         b_fs_dec.setMinimumWidth(28)
         b_fs_dec.clicked.connect(lambda: self._change_font_size(-1.0))
@@ -405,12 +394,13 @@ class ReaderView(QWidget):
 
         path = self.current_chat.path
         bms = self.project_ctrl.get_bookmarks(path)
+        hls = self.project_ctrl.get_highlights(path)
 
-        def get_block_highlights(num: int) -> List[Dict[str, str]]:
-            return [b for b in bms if b.get("block_num") == num and b.get("quote")]
+        def get_block_highlights(num: int) -> List[Dict[str, Any]]:
+            return [h for h in hls if h.get("block_num") == num]
 
         def is_block_bm(num: int) -> bool:
-            return any(b.get("block_num") == num and not b.get("quote") for b in bms)
+            return any(b.get("block_num") == num for b in bms)
 
         if self.current_chat.system_instruction:
             self.blocks.append(
@@ -443,35 +433,57 @@ class ReaderView(QWidget):
                 )
             )
 
-    def _apply_highlights_to_text(self, text: str, highlights: List[Dict[str, str]]) -> str:
+    def _apply_highlights_to_text(self, text: str, highlights: List[Dict[str, Any]], is_markdown: bool) -> str:
+        """
+        Применяет маркеры к тексту. Для сохранения Markdown-разметки и порядка
+        выделения сортируются с конца строки к началу.
+        """
         if not highlights or not text:
-            return text
-        res = text
-        for h in highlights:
-            quote = h.get("quote", "").strip()
-            if not quote:
-                continue
-            color_key = h.get("color", "yellow")
-            c_info = HIGHLIGHT_COLORS.get(color_key, HIGHLIGHT_COLORS["yellow"])
-            bg_hex = c_info["hex"]
-            fg_hex = c_info["text"]
-            mark_tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;">{_html.escape(quote)}</mark>'
-            res = res.replace(quote, f"@@@MARK_{id(h)}@@@")
+            return markdown_to_html(text) if is_markdown else _html.escape(text).replace("\n", "<br/>")
 
-        res = _html.escape(res).replace("\n", "<br/>")
+        # Находим вхождения цитат
+        spans_to_mark: List[Tuple[int, int, str, str]] = []
         for h in highlights:
             quote = h.get("quote", "").strip()
             if not quote:
                 continue
             color_key = h.get("color", "yellow")
-            c_info = HIGHLIGHT_COLORS.get(color_key, HIGHLIGHT_COLORS["yellow"])
-            bg_hex = c_info["hex"]
-            fg_hex = c_info["text"]
             note = h.get("note", "")
-            note_attr = f' title="{_html.escape(note)}"' if note else ""
-            mark_tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;"{note_attr}>{_html.escape(quote)}</mark>'
-            res = res.replace(f"@@@MARK_{id(h)}@@@", mark_tag)
-        return res
+
+            # Ищем позицию цитаты в исходном тексте
+            pos = text.find(quote)
+            if pos >= 0:
+                spans_to_mark.append((pos, pos + len(quote), color_key, note))
+
+        # Сортируем с конца к началу, чтобы не сдвигать индексы
+        spans_to_mark.sort(key=lambda s: s[0], reverse=True)
+
+        if not is_markdown:
+            # Для plain-text режима: экранируем и вставляем <mark>
+            res = text
+            for start, end, color_key, note in spans_to_mark:
+                c_info = HIGHLIGHT_COLORS.get(color_key, HIGHLIGHT_COLORS["yellow"])
+                bg_hex = c_info["hex"]
+                fg_hex = c_info["text"]
+                note_attr = f' title="{_html.escape(note)}"' if note else ""
+                escaped_quote = _html.escape(res[start:end])
+                tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;"{note_attr}>{escaped_quote}</mark>'
+                res = res[:start] + tag + res[end:]
+            return res.replace("\n", "<br/>")
+        else:
+            # Для Markdown: сначала рендерим Markdown, затем подсвечиваем безопасные цитаты
+            html_out = markdown_to_html(text)
+            for _, _, color_key, note in spans_to_mark:
+                c_info = HIGHLIGHT_COLORS.get(color_key, HIGHLIGHT_COLORS["yellow"])
+                bg_hex = c_info["hex"]
+                fg_hex = c_info["text"]
+                for h in highlights:
+                    q = h.get("quote", "").strip()
+                    if q and q in html_out:
+                        note_attr = f' title="{_html.escape(note)}"' if note else ""
+                        tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;"{note_attr}>{_html.escape(q)}</mark>'
+                        html_out = html_out.replace(q, tag, 1)
+            return html_out
 
     def rebuild_view(self):
         if not self.blocks:
@@ -642,9 +654,10 @@ class ReaderView(QWidget):
                 att_html = f"<div style='color:{muted_color}; margin-bottom:8px; font-size:10pt;'>{att_items}</div>"
 
             # Body text with Highlights
+            is_md = self.render_md and not is_user
             if b.highlights:
-                body_content = self._apply_highlights_to_text(b.text, b.highlights)
-            elif self.render_md and not is_user:
+                body_content = self._apply_highlights_to_text(b.text, b.highlights, is_md)
+            elif is_md:
                 body_content = markdown_to_html(b.text)
             else:
                 body_content = _html.escape(b.text).replace("\n", "<br/>") if b.text else f"<i>{self._tr('empty_message')}</i>"
@@ -692,7 +705,6 @@ class ReaderView(QWidget):
                 else (self._tr("system_instruction") if b.role == "system" else (b.model or self._tr("model")))
             )
 
-            # Если есть цитата — покажем её в оглавлении
             if b.highlights:
                 quote_preview = b.highlights[0].get("quote", "")[:45]
                 item_label = f"{icon}#{b.num} {role_txt} · «{quote_preview}…»"
@@ -737,7 +749,6 @@ class ReaderView(QWidget):
 
     # ---- Highlighter & Quotes ----
     def highlight_selection(self, color: str = "yellow"):
-        """Выделяет выбранный курсором фрагмент текста маркером."""
         cursor = self.browser.textCursor()
         if not cursor.hasSelection():
             QMessageBox.information(self, "Маркер цитат", "Сначала выделите текст в окне чтения мышью.")
@@ -752,6 +763,8 @@ class ReaderView(QWidget):
 
         path = self.current_chat.path
         target_num = self._current_block_num
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
 
         note, ok = QInputDialog.getText(
             self,
@@ -762,13 +775,19 @@ class ReaderView(QWidget):
         if not ok:
             return
 
+        target_block = next((b for b in self.blocks if b.num == target_num), None)
+        source_text = target_block.text if target_block else ""
+
         self.project_ctrl.add_highlight(
             path=path,
             block_num=target_num,
             quote=quote,
             color=color,
+            start=start,
+            end=end,
             title=self.current_chat.title,
             note=note.strip(),
+            source_text=source_text,
         )
 
         self._load_blocks_from_chat()
@@ -780,7 +799,7 @@ class ReaderView(QWidget):
         quote = cursor.selectedText().strip()
         if not quote or not self.current_chat:
             return
-        self.project_ctrl.remove_highlight(self.current_chat.path, self._current_block_num, quote)
+        self.project_ctrl.remove_highlight_by_quote(self.current_chat.path, self._current_block_num, quote)
         self._load_blocks_from_chat()
         self.rebuild_view()
         self.jump_to_block(self._current_block_num)

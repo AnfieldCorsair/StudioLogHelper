@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from ..core.models import ChatLog
 from .stemmer import match_stemmed_query
@@ -24,23 +24,27 @@ class MemoryHit:
     score: int
 
 
-def _plain_snippet(text: str, q: str, limit: int = 220, match_spans: List[Tuple[int, int]] | None = None) -> str:
-    one = re.sub(r"\s+", " ", text).strip()
-    if not one:
+def _plain_snippet(text: str, q: str, limit: int = 220, match_spans: Optional[List[Tuple[int, int]]] = None) -> str:
+    """Точный сниппет без смещения позиций при форматировании пробелов."""
+    if not text:
         return ""
     if match_spans and len(match_spans) > 0:
         pos, end = match_spans[0]
         a = max(0, pos - 70)
         b = min(len(text), end + 140)
-        frag = text[a:b].replace("\n", " ").strip()
+        raw_slice = text[a:b]
+        frag = re.sub(r"\s+", " ", raw_slice).strip()
         return ("…" if a > 0 else "") + frag + ("…" if b < len(text) else "")
 
-    pos = one.lower().find(q.lower())
+    pos = text.lower().find(q.lower())
     if pos < 0:
-        return one[:limit] + ("…" if len(one) > limit else "")
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        return cleaned[:limit] + ("…" if len(cleaned) > limit else "")
     a = max(0, pos - 70)
-    b = min(len(one), pos + len(q) + 140)
-    return ("…" if a else "") + one[a:b] + ("…" if b < len(one) else "")
+    b = min(len(text), pos + len(q) + 140)
+    raw_slice = text[a:b]
+    frag = re.sub(r"\s+", " ", raw_slice).strip()
+    return ("…" if a > 0 else "") + frag + ("…" if b < len(text) else "")
 
 
 def _search_one_chat(args) -> List[MemoryHit]:
@@ -62,7 +66,6 @@ def _search_one_chat(args) -> List[MemoryHit]:
                 candidates.append((t, "model", True))
 
         for text, role, is_thought in candidates:
-            # 1. Прямой быстрый поиск
             if q_lower in text.lower():
                 score = text.lower().count(q_lower) * 5
                 hits.append(
@@ -78,7 +81,6 @@ def _search_one_chat(args) -> List[MemoryHit]:
                     )
                 )
                 break
-            # 2. Если прямой не найден и включён стемминг/морфология
             elif use_stemming:
                 matched, score, spans = match_stemmed_query(q_original, text)
                 if matched:

@@ -5,7 +5,7 @@
   1. Лексический поиск (Exact / FTS5 BM25)
   2. Морфологический стемминг (Словоформы, Портер RU/EN)
   3. Субсловные/n-граммные локальные эмбеддинги и косинусную близость (Semantic/Fuzzy)
-  4. Reciprocal Rank Fusion (RRF) и взвешенный скоринг
+  4. Взвешенный скоринг без смещения оффсетов сниппетов
 """
 
 from __future__ import annotations
@@ -53,7 +53,6 @@ def compute_subword_vector(text: str, n_range: Tuple[int, int] = (3, 4)) -> Dict
         if w_len < n_range[0]:
             grams[word] += 2
 
-    # L2-нормализация вектора
     total_sq = sum(c * c for c in grams.values())
     if total_sq == 0:
         return {}
@@ -65,20 +64,28 @@ def cosine_similarity(vec_a: Dict[str, float], vec_b: Dict[str, float]) -> float
     """Вычисляет косинусное сходство двух нормализованных векторов."""
     if not vec_a or not vec_b:
         return 0.0
-    # Итерируемся по меньшему словарю
     if len(vec_a) > len(vec_b):
         vec_a, vec_b = vec_b, vec_a
     return sum(val * vec_b.get(key, 0.0) for key, val in vec_a.items())
 
 
 def build_snippet(text: str, spans: List[Tuple[int, int]], limit: int = 240) -> str:
-    one = re.sub(r"\s+", " ", text).strip()
+    """Извлекает точный сниппет из оригинального текста с защитой от смещения позиций."""
+    if not text:
+        return ""
     if not spans:
-        return one[:limit] + ("…" if len(one) > limit else "")
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        return cleaned[:limit] + ("…" if len(cleaned) > limit else "")
+
     first_start, first_end = spans[0]
     a = max(0, first_start - 70)
-    b = min(len(one), first_end + 150)
-    return ("…" if a > 0 else "") + one[a:b] + ("…" if b < len(one) else "")
+    b = min(len(text), first_end + 150)
+    raw_slice = text[a:b]
+    cleaned_slice = re.sub(r"\s+", " ", raw_slice).strip()
+
+    prefix = "…" if a > 0 else ""
+    suffix = "…" if b < len(text) else ""
+    return prefix + cleaned_slice + suffix
 
 
 class HybridSearchEngine:
@@ -88,6 +95,17 @@ class HybridSearchEngine:
         self.alpha = alpha_exact
         self.beta = beta_stem
         self.gamma = gamma_semantic
+        self._vector_cache: Dict[str, Dict[str, float]] = {}
+
+    def _get_or_compute_vector(self, text: str) -> Dict[str, float]:
+        key = hash(text)
+        if key in self._vector_cache:
+            return self._vector_cache[key]
+        vec = compute_subword_vector(text)
+        if len(self._vector_cache) > 2000:
+            self._vector_cache.clear()
+        self._vector_cache[key] = vec
+        return vec
 
     def search_chats(
         self,
@@ -141,7 +159,7 @@ class HybridSearchEngine:
                                 spans.append(s)
 
                     # 3. Семантическая векторная близость (Subword Dense Vector)
-                    doc_vec = compute_subword_vector(text)
+                    doc_vec = self._get_or_compute_vector(text)
                     sem_score = cosine_similarity(q_vec, doc_vec)
 
                     # Комбинированный гибридный скор
@@ -151,7 +169,6 @@ class HybridSearchEngine:
                         + self.gamma * (sem_score if (fts_score > 0 or stem_score > 0 or sem_score > 0.35) else 0.0)
                     )
 
-                    # Отсекаем нерелевантные совпадения
                     if total_score > 0.15 or fts_score > 0 or stem_matched:
                         spans.sort(key=lambda x: x[0])
                         snippet = build_snippet(text, spans)
@@ -173,6 +190,5 @@ class HybridSearchEngine:
                         )
                         break
 
-        # Сортировка по гибридному скору (убывание)
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:limit]

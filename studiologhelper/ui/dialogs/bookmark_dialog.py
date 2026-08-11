@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""BookmarkDialog — диалог управления закладками и цитатами-маркерами проекта."""
+"""BookmarkDialog — надёжное управление закладками и цитатами-маркерами по UUID."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class BookmarkDialog(QDialog):
         self.current_chat = current_chat
         self._tr = translator.tr
         self.setWindowTitle(self._tr("reader_bookmarks") + " и Цитаты")
-        self.resize(860, 540)
+        self.resize(880, 540)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)
@@ -115,29 +115,31 @@ class BookmarkDialog(QDialog):
         self._refresh()
 
     def _refresh(self):
-        all_bms = self.project_ctrl.get_all_bookmarks()
-        self.table.setRowCount(len(all_bms))
-        self.lbl_count.setText(f"Всего закладок и цитат: {len(all_bms)}")
+        all_items = self.project_ctrl.get_all_bookmarks_and_highlights()
+        self.table.setRowCount(len(all_items))
+        self.lbl_count.setText(f"Всего закладок и цитат: {len(all_items)}")
 
-        for row, bm in enumerate(all_bms):
-            path = bm.get("path", "")
-            num = bm.get("block_num", 1)
-            role = bm.get("role", "")
-            note = bm.get("note", "")
-            quote = bm.get("quote", "")
-            snippet = bm.get("snippet", "")
-            color = bm.get("color", "")
+        for row, item in enumerate(all_items):
+            path = item.get("path", "")
+            num = item.get("block_num", 1)
+            role = item.get("role", "")
+            note = item.get("note", "")
+            quote = item.get("quote", "")
+            snippet = item.get("snippet", "")
+            color = item.get("color", "")
+            item_id = item.get("id", "")
+            is_highlight = item.get("is_highlight", False)
 
-            type_label = "🖍 Цитата" if quote else "🔖 Закладка"
+            type_label = f"🖍 {HIGHLIGHT_COLORS.get(color, {}).get('name', 'Цитата')}" if is_highlight else "🔖 Закладка"
 
             it_num = QTableWidgetItem(f"#{num}")
-            it_num.setData(Qt.ItemDataRole.UserRole, (path, num, quote))
+            it_num.setData(Qt.ItemDataRole.UserRole, (path, num, is_highlight, item_id))
             it_type = QTableWidgetItem(type_label)
-            it_path = QTableWidgetItem(bm.get("title") or (path.split("/")[-1] if path else "—"))
+            it_path = QTableWidgetItem(item.get("title") or (path.split("/")[-1] if path else "—"))
             it_role = QTableWidgetItem(role or "—")
             it_note = QTableWidgetItem(note or "—")
 
-            display_text = f"«{quote}»" if quote else snippet.replace("\n", " ")[:120]
+            display_text = f"«{quote}»" if is_highlight else snippet.replace("\n", " ")[:120]
             it_snip = QTableWidgetItem(display_text)
 
             self.table.setItem(row, 0, it_num)
@@ -147,7 +149,7 @@ class BookmarkDialog(QDialog):
             self.table.setItem(row, 4, it_note)
             self.table.setItem(row, 5, it_snip)
 
-    def _get_selected_data(self) -> Optional[Tuple[str, int, str]]:
+    def _get_selected_data(self) -> Optional[Tuple[str, int, bool, str]]:
         row = self.table.currentRow()
         if row < 0:
             return None
@@ -159,7 +161,7 @@ class BookmarkDialog(QDialog):
     def _jump_selected(self):
         data = self._get_selected_data()
         if data:
-            path, num, quote = data
+            path, num, _, _ = data
             self.jumpToBookmark.emit(path, num)
             self.accept()
 
@@ -170,46 +172,54 @@ class BookmarkDialog(QDialog):
         data = self._get_selected_data()
         if not data:
             return
-        path, num, quote = data
-        if quote:
-            self.project_ctrl.remove_highlight(path, num, quote)
+        path, num, is_highlight, item_id = data
+        if is_highlight:
+            self.project_ctrl.remove_highlight_by_id(path, item_id)
         else:
-            self.project_ctrl.remove_bookmark(path, num)
+            self.project_ctrl.remove_bookmark_by_id(path, item_id)
         self._refresh()
 
     def _edit_note(self):
         data = self._get_selected_data()
         if not data:
             return
-        path, num, quote = data
-        bms = self.project_ctrl.get_bookmarks(path)
+        path, num, is_highlight, item_id = data
+
         cur_note = ""
-        for b in bms:
-            if b.get("block_num") == num and b.get("quote") == quote:
-                cur_note = b.get("note", "")
-                break
+        if is_highlight:
+            for h in self.project_ctrl.get_highlights(path):
+                if h.get("id") == item_id:
+                    cur_note = h.get("note", "")
+                    break
+        else:
+            for b in self.project_ctrl.get_bookmarks(path):
+                if b.get("id") == item_id:
+                    cur_note = b.get("note", "")
+                    break
+
         text, ok = QInputDialog.getText(self, "Заметка", self._tr("bookmark_note_prompt"), text=cur_note)
         if ok:
-            if quote:
-                self.project_ctrl.add_highlight(path, num, quote=quote, note=text.strip())
+            if is_highlight:
+                self.project_ctrl.update_highlight_note(path, item_id, text.strip())
             else:
-                self.project_ctrl.add_bookmark(path, num, note=text.strip())
+                self.project_ctrl.update_bookmark_note(path, item_id, text.strip())
             self._refresh()
 
     def _copy_markdown_summary(self):
-        all_bms = self.project_ctrl.get_all_bookmarks()
-        if not all_bms:
+        all_items = self.project_ctrl.get_all_bookmarks_and_highlights()
+        if not all_items:
             return
         lines = ["# Дайджест закладок и цитат проекта\n"]
-        for b in all_bms:
-            header_type = "Цитата" if b.get("quote") else "Закладка"
-            lines.append(f"### #{b.get('block_num')} [{header_type}] — {b.get('title', b.get('path', ''))}")
-            if b.get("quote"):
-                lines.append(f"> 🖍 **Цитата:** «{b.get('quote')}»")
-            if b.get("note"):
-                lines.append(f"> 📝 **Заметка:** {b.get('note')}")
-            if b.get("snippet") and not b.get("quote"):
-                lines.append(f"```\n{b.get('snippet')}\n```")
+        for item in all_items:
+            is_hl = item.get("is_highlight", False)
+            header_type = "Цитата" if is_hl else "Закладка"
+            lines.append(f"### #{item.get('block_num')} [{header_type}] — {item.get('title', item.get('path', ''))}")
+            if is_hl:
+                lines.append(f"> 🖍 **Цитата:** «{item.get('quote')}»")
+            if item.get("note"):
+                lines.append(f"> 📝 **Заметка:** {item.get('note')}")
+            if item.get("snippet") and not is_hl:
+                lines.append(f"```\n{item.get('snippet')}\n```")
             lines.append("")
         from PyQt6.QtGui import QGuiApplication
         QGuiApplication.clipboard().setText("\n".join(lines))

@@ -4,6 +4,7 @@
 from pathlib import Path
 from studiologhelper.core.models import ChatLog, Message
 from studiologhelper.core.project import (
+    Highlight,
     Project,
     ProjectBookmark,
     ProjectFile,
@@ -76,13 +77,11 @@ def test_hybrid_search_engine():
         ],
     )
 
-    # Search word variation "сковородка"
     hits = engine.search_chats([chat], "сковородка")
     assert len(hits) >= 1
     assert hits[0].msg_num in (1, 2)
     assert hits[0].score > 0
 
-    # Search subword / fuzzy
     hits_quantum = engine.search_chats([chat], "квантовый")
     assert len(hits_quantum) >= 1
     assert hits_quantum[0].msg_num == 4
@@ -100,19 +99,22 @@ def test_hierarchical_categories_matching():
 
 def test_project_highlights_and_autosave(tmp_path):
     proj_path = tmp_path / "test_proj.slh.json"
-    bm = ProjectBookmark(
+    hl = Highlight(
         block_num=2,
-        role="model",
-        title="Chat Title",
-        note="Key insight",
         quote="чугунную сковородку",
         color="yellow",
+        note="Key insight",
+    )
+    bm = ProjectBookmark(
+        block_num=1,
+        note="Bookmark note",
     )
     pf = ProjectFile(
         path="/path/to/chat.json",
         title="Chat Title",
         model="gemini-1.5-pro",
         bookmarks=[bm],
+        highlights=[hl],
     )
     proj = Project(name="TestProj", files=[pf])
     proj.save(proj_path)
@@ -120,8 +122,9 @@ def test_project_highlights_and_autosave(tmp_path):
     loaded = Project.load(proj_path)
     assert len(loaded.files) == 1
     assert len(loaded.files[0].bookmarks) == 1
-    assert loaded.files[0].bookmarks[0].quote == "чугунную сковородку"
-    assert loaded.files[0].bookmarks[0].color == "yellow"
+    assert len(loaded.files[0].highlights) == 1
+    assert loaded.files[0].highlights[0].quote == "чугунную сковородку"
+    assert loaded.files[0].highlights[0].color == "yellow"
 
 
 def test_controllers_and_services(tmp_path):
@@ -162,10 +165,10 @@ def test_controllers_and_services(tmp_path):
     assert proj_ctrl.get_tags(chat1.path) == ["python", "ai"]
 
     proj_ctrl.add_highlight(chat1.path, block_num=1, quote="Hello", color="green", note="Greeting quote")
-    bms = proj_ctrl.get_bookmarks(chat1.path)
-    assert len(bms) == 1
-    assert bms[0]["quote"] == "Hello"
-    assert bms[0]["color"] == "green"
+    hls = proj_ctrl.get_highlights(chat1.path)
+    assert len(hls) == 1
+    assert hls[0]["quote"] == "Hello"
+    assert hls[0]["color"] == "green"
 
     # Hierarchical filter test
     proj_ctrl.assign_category(chat1.path, "Work/AI/Gemini")
