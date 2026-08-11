@@ -1,8 +1,41 @@
 # -*- coding: utf-8 -*-
 """Воркер для экспорта с прогрессом."""
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any, List
+
+try:
+    from PyQt6.QtCore import QThread, pyqtSignal
+except ImportError:
+    class QThread:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            self.run()
+        def wait(self):
+            pass
+        def isRunning(self):
+            return False
+
+    class _Signal:
+        def __init__(self, *args, **kwargs):
+            self._handlers = []
+        def connect(self, handler):
+            self._handlers.append(handler)
+        def emit(self, *args, **kwargs):
+            for h in list(self._handlers):
+                try:
+                    h(*args, **kwargs)
+                except TypeError:
+                    try:
+                        h()
+                    except Exception:
+                        pass
+
+    def pyqtSignal(*args, **kwargs):  # type: ignore
+        return _Signal()
 
 
 class ExportWorker(QThread):
@@ -11,7 +44,7 @@ class ExportWorker(QThread):
     error = pyqtSignal(str, str)  # chat title, error
     allDone = pyqtSignal(list, list)  # created all, errors
 
-    def __init__(self, chats, opts, out_dir):
+    def __init__(self, chats: List[Any], opts: Any, out_dir: str | Path):
         super().__init__()
         self.chats = chats
         self.opts = opts

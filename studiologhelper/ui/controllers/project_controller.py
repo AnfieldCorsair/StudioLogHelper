@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ProjectController — надёжное управление проектами .slh.json с debounce-автосохранением, UUID-закладками и маркерами."""
+"""ProjectController — надёжное управление проектами .slh.json с неблокирующим воркером автосохранения, UUID-закладками и миграцией QSettings."""
 
 from __future__ import annotations
 
@@ -70,13 +70,14 @@ from ...core.project import (
 )
 from ...utils.logger import get_logger
 from ..undo import Command, UndoManager
+from ..workers.save_worker import SaveProjectWorker
 
 logger = get_logger()
 AUTOSAVE_DEBOUNCE_MS = 500
 
 
 class ProjectController(QObject):
-    """Контроллер проектов, иерархических категорий, тегов, закладок, цитат-маркеров и debounce-автосохранения."""
+    """Контроллер проектов, иерархических категорий, тегов, закладок, цитат-маркеров и неблокирующего автосохранения."""
 
     projectChanged = pyqtSignal()
     metadataChanged = pyqtSignal(str)  # chat_path
@@ -98,6 +99,7 @@ class ProjectController(QObject):
 
         self._cached_chats_ref: List[ChatLog] = []
         self._last_saved_file_count: int = 0
+        self._active_save_worker: Optional[SaveProjectWorker] = None
 
         # Debounce Timer для неблокирующего автосохранения
         self._autosave_timer = QTimer()
@@ -112,9 +114,40 @@ class ProjectController(QObject):
         self.chat_highlights: Dict[str, List[Dict[str, Any]]] = self._load_json("org/chat_highlights", {})
         self.categories: Set[str] = set(v for v in self.chat_categories.values() if v)
 
+        # Одноразовая миграция старых записей из QSettings
+        self._migrate_qsettings_highlights()
+
         self.recent_projects: List[str] = [
             x for x in self._load_json("org/recent_projects", []) if isinstance(x, str)
         ]
+
+    def _migrate_qsettings_highlights(self):
+        """Мигрирует закладки, содержащие цитаты, из chat_bookmarks в chat_highlights."""
+        migrated = False
+        for path, bms in list(self.chat_bookmarks.items()):
+            new_bms = []
+            for b in bms:
+                if isinstance(b, dict) and b.get("quote"):
+                    hl_list = self.chat_highlights.setdefault(path, [])
+                    if not any(h.get("id") == b.get("id") or (h.get("quote") == b.get("quote") and h.get("block_num") == b.get("block_num")) for h in hl_list):
+                        hl_list.append({
+                            "id": b.get("id") or str(uuid.uuid4()),
+                            "block_num": int(b.get("block_num", 1)),
+                            "start": int(b.get("start", 0)),
+                            "end": int(b.get("end", 0)),
+                            "quote": str(b.get("quote", "")),
+                            "color": str(b.get("color", "yellow")),
+                            "note": str(b.get("note", "")),
+                            "source_text_hash": str(b.get("source_text_hash", "")),
+                        })
+                    migrated = True
+                else:
+                    new_bms.append(b)
+            self.chat_bookmarks[path] = new_bms
+
+        if migrated:
+            self.save_all_to_settings()
+            logger.info("Migrated legacy quotes from QSettings chat_bookmarks to chat_highlights")
 
     def _load_json(self, key: str, default: Any) -> Any:
         try:
@@ -143,9 +176,9 @@ class ProjectController(QObject):
     def set_active_chats_ref(self, chats: List[ChatLog]):
         self._cached_chats_ref = chats
 
-    # ---- Autosave с Debounce и защитой целостности данных ----
+    # ---- Autosave с Debounce и неблокирующим фоновым воркером ----
     def trigger_autosave(self):
-        """Планирует отложенное автосохранение с debounce, защищая от фризов и перезаписи пустым списком."""
+        """Планирует неблокирующее автосохранение с debounce, защищая от фризов GUI."""
         if not self.auto_save_enabled:
             return
         if self.is_loading or self.is_initializing:
@@ -163,12 +196,22 @@ class ProjectController(QObject):
             if not self._cached_chats_ref and self._last_saved_file_count > 0:
                 logger.warning("Autosave skipped: chat list is temporarily empty during transition")
                 return
-            try:
-                self.save_project(self.current_project_path, self._cached_chats_ref, self.current_project_name)
+
+            # Создаём мгновенный снимок в памяти и передаём на асинхронную запись в воркер
+            snapshot = self.create_project_snapshot(name=self.current_project_name, path=self.current_project_path)
+            target_path = self.current_project_path
+
+            def on_saved(saved_path):
                 self.dirty = False
-                self.autoSaved.emit(self.current_project_path)
-            except Exception as ex:
-                logger.warning("Debounced autosave failed: %s", ex)
+                self.autoSaved.emit(saved_path)
+
+            def on_error(saved_path, err):
+                logger.error("Autosave error on %s: %s", saved_path, err)
+
+            self._active_save_worker = SaveProjectWorker(snapshot, target_path)
+            self._active_save_worker.savedDone.connect(on_saved)
+            self._active_save_worker.savedError.connect(on_error)
+            self._active_save_worker.start()
 
     # ---- Hierarchical Categories ----
     def get_hierarchical_categories(self) -> List[Tuple[str, int, str]]:
@@ -311,7 +354,7 @@ class ProjectController(QObject):
 
         self.undo_manager.execute(Command("Set note", do, undo))
 
-    # ---- Bookmarks (Изолированные от цитат с уникальным UUID) ----
+    # ---- Bookmarks ----
     def get_bookmarks(self, path_or_chat: str | ChatLog) -> List[Dict[str, Any]]:
         p = path_or_chat.path if isinstance(path_or_chat, ChatLog) else path_or_chat
         return list(self.chat_bookmarks.get(p or "", []))
@@ -364,7 +407,6 @@ class ProjectController(QObject):
         return bm_id
 
     def update_bookmark_note(self, path: str, bm_id: str, note: str):
-        """Обновляет заметку конкретной закладки по UUID без создания дубликатов."""
         if not path or path not in self.chat_bookmarks:
             return
         for b in self.chat_bookmarks[path]:
@@ -390,7 +432,6 @@ class ProjectController(QObject):
             callback()
 
     def remove_bookmark(self, path: str, block_num: int, callback: Optional[Callable] = None):
-        """Удаляет закладку на блок. НЕ удаляет маркеры/цитаты этого же блока!"""
         if not path or path not in self.chat_bookmarks:
             return
         bms = [b for b in self.chat_bookmarks[path] if b.get("block_num") != block_num]
@@ -404,7 +445,7 @@ class ProjectController(QObject):
         if callback:
             callback()
 
-    # ---- Highlights / Маркеры цитат (Изолированные с точными позициями и UUID) ----
+    # ---- Highlights / Маркеры цитат ----
     def get_highlights(self, path_or_chat: str | ChatLog) -> List[Dict[str, Any]]:
         p = path_or_chat.path if isinstance(path_or_chat, ChatLog) else path_or_chat
         return list(self.chat_highlights.get(p or "", []))
@@ -448,7 +489,6 @@ class ProjectController(QObject):
         return hl_id
 
     def update_highlight_note(self, path: str, hl_id: str, note: str):
-        """Обновляет заметку конкретной цитаты по UUID без создания дубликатов."""
         if not path or path not in self.chat_highlights:
             return
         for h in self.chat_highlights[path]:
@@ -493,9 +533,8 @@ class ProjectController(QObject):
                 out.append({"path": path, "is_highlight": True, **h})
         return out
 
-    # ---- Project Persistence (.slh.json) с созданием снимков ----
+    # ---- Project Persistence (.slh.json) ----
     def create_project_snapshot(self, name: str = "", path: str = "") -> Project:
-        """Создает изолированный снимок проекта для безопасного сохранения."""
         files_meta: List[ProjectFile] = []
         for chat in self._cached_chats_ref:
             bms = [

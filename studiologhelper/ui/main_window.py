@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""MainWindow — главное окно приложения StudioLogHelper 2.0 (PyQt6).
+"""MainWindow — главное окно приложения StudioLogHelper (PyQt6).
 
-Оптимизации:
-  - Ленивая отрисовка вкладок (рендерится ТОЛЬКО активная вкладка, 0ms лагов при переключении галочек)
+Оптимизации и архитектура:
+  - Ленивая отрисовка вкладок (рендерится ТОЛЬКО активная вкладка, 0ms лагов)
+  - Асинхронный фоновый поиск через SearchWorker с отменой устаревших запросов
   - Аппаратная виртуализация для 10k+ сообщений
-  - Гибридный поиск (FTS5 + Стемминг + Локальные эмбеддинги)
+  - Гибридный поиск (FTS5 + Стемминг + Локальные субсловные эмбеддинги)
   - Иерархические категории (Work/Research/Gemini)
-  - Автосохранение проектов .slh.json
+  - Автосохранение проектов .slh.json с debounce
   - Адаптивное масштабирование кнопок и шрифтов
 """
 
@@ -50,12 +51,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..core.exporters.base import CONTENT_ALL, CONTENT_ANSWERS, CONTENT_PROMPTS, CONTENT_THOUGHTS
 from ..core.models import COPY_ALL, COPY_ANSWERS, COPY_PROMPTS, COPY_THOUGHTS, ChatLog, Message
 from ..core.parsers.base import TextParseOptions
+from ..core.plugins import get_global_registry, is_safe_mode, set_safe_mode
 from ..i18n.translator import DEFAULT_LANG, LANGS, Translator
 from ..indexer import HybridSearchEngine, SearchIndex
-from ..indexer.memory_search import fast_search_chats
 from ..utils.logger import get_logger, setup_logger
 from ..utils.paths import reveal_in_file_manager
 from .controllers import FileListController, ProjectController
@@ -79,7 +81,7 @@ from .widgets import (
     VirtualMessageListView,
     load_icon,
 )
-from .workers import ParseWorker
+from .workers import ParseWorker, SearchWorker
 
 logger = setup_logger()
 
@@ -100,7 +102,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_NAME + " 2.0 (PyQt6 + Book Reader)")
+        self.setWindowTitle(f"{APP_NAME} {__version__} (PyQt6 + Book Reader)")
         self.resize(1340, 860)
         self.setMinimumSize(820, 520)
         self.setAcceptDrops(True)
@@ -114,7 +116,7 @@ class MainWindow(QMainWindow):
         self.file_ctrl = FileListController(self.project_ctrl)
         self.hybrid_engine = HybridSearchEngine()
 
-        # UI State & Preferences
+        # UI State & Preferences (QSettings — источник глобальных настроек интерфейса)
         self.theme_name = self.settings.value("ui/theme", "dark")
         self.render_md = self.settings.value("ui/render_md", "true") == "true"
         self.show_thoughts = self.settings.value("ui/show_thoughts", "true") == "true"
@@ -139,6 +141,7 @@ class MainWindow(QMainWindow):
         self._render_gen = 0
         self._render_next = 0
         self._parse_worker: Optional[ParseWorker] = None
+        self._search_worker: Optional[SearchWorker] = None
 
         # Ленивые флаги отрисовки табов (0: Cards, 1: Virtual, 2: Reader, 3: Raw)
         self._tab_dirty: Dict[int, bool] = {0: True, 1: True, 2: True, 3: True}
@@ -148,6 +151,10 @@ class MainWindow(QMainWindow):
         self._zoom_timer.setSingleShot(True)
         self._zoom_timer.timeout.connect(self._apply_zoom)
 
+        self._search_debounce_timer = QTimer(self)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.timeout.connect(self.do_search)
+
         # Build UI & signals
         self._build_ui()
         self._connect_signals()
@@ -155,7 +162,7 @@ class MainWindow(QMainWindow):
         self._setup_hotkeys()
 
         self.statusBar().showMessage(self.tr("status_hint"))
-        logger.info("MainWindow initialized with modular architecture")
+        logger.info("MainWindow initialized with modular architecture v%s", __version__)
 
     def tr(self, k: str, **kw) -> str:
         return self.translator.tr(k, **kw)
@@ -170,7 +177,7 @@ class MainWindow(QMainWindow):
             numbered_mode=self.settings.value("parse/numbered_mode", "model"),
         )
 
-    def _decorate(self, btn, icon_name: str, min_w: int = 0):
+    def _decorate(self, btn, icon_name: str):
         orig = btn.text()
         ic = load_icon(icon_name)
         compact = strip_emoji(orig) or orig
@@ -249,7 +256,7 @@ class MainWindow(QMainWindow):
         om.addAction(self.tr("project_open"), self.open_project)
         om.addAction(self.tr("project_save"), self.save_project)
         om.addSeparator()
-        om.addAction("Plugins…", self._show_plugins)
+        om.addAction("Plugins & Security…", self._show_plugins)
         om.addAction("Undo (Ctrl+Z)", self.undo)
         om.addAction("Redo (Ctrl+Y)", self.redo)
         self.btn_org.setMenu(om)
@@ -443,7 +450,8 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(w)
         row1 = QHBoxLayout()
         self.ed_query = QLineEdit()
-        self.ed_query.setPlaceholderText("Гибридный поиск (слова, фразы, формы слов)…")
+        self.ed_query.setPlaceholderText("Поиск: слова, фразы в кавычках, формы слов…")
+        self.ed_query.textChanged.connect(lambda: self._search_debounce_timer.start(350))
         self.ed_query.returnPressed.connect(self.do_search)
         row1.addWidget(self.ed_query, 1)
         b_search = QPushButton(self.tr("search_btn"))
@@ -486,7 +494,7 @@ class MainWindow(QMainWindow):
         self.search_results.itemActivated.connect(self._open_search_hit)
         v.addWidget(self.search_results, 1)
 
-        hint = QLabel(self.tr("search_hint") + " | Ctrl+F фокус, Ctrl+K быстрый поиск")
+        hint = QLabel(self.tr("search_hint") + " | Ctrl+F фокус, Ctrl+K быстрый поиск (неблокирующий)")
         hint.setObjectName("muted")
         v.addWidget(hint)
         return w
@@ -548,7 +556,6 @@ class MainWindow(QMainWindow):
             return
 
         chat = self.file_ctrl.current
-        # Always update header info
         info_str = MessageRenderer.format_info_header(
             chat, self.project_ctrl, self.file_ctrl.show_diagnostics, self.file_ctrl.show_extensions, self.tr
         )
@@ -696,7 +703,6 @@ class MainWindow(QMainWindow):
         self.cmb_filter_cat.addItem(self.tr("all_categories"), "")
         self.cmb_filter_cat.addItem(self.tr("uncategorized"), "__none__")
 
-        # Иерархический вывод категорий с отступами
         for full_cat, depth, label in self.project_ctrl.get_hierarchical_categories():
             self.cmb_filter_cat.addItem(label, full_cat)
 
@@ -728,9 +734,10 @@ class MainWindow(QMainWindow):
                 cat = self.project_ctrl.get_category(chat)
                 tags = self.project_ctrl.get_tags(chat)
                 bms = self.project_ctrl.get_bookmarks(chat)
+                hls = self.project_ctrl.get_highlights(chat)
 
                 title = f"[{cat}] {chat.title}" if cat else chat.title
-                if bms:
+                if bms or hls:
                     title = f"🔖 {title}"
                 if tags:
                     title += "  " + " ".join("#" + t for t in tags[:4])
@@ -1196,17 +1203,25 @@ class MainWindow(QMainWindow):
             self._mark_all_tabs_dirty()
 
     def _show_plugins(self):
-        from ..core.plugins import get_global_registry
-
         reg = get_global_registry()
-        names = "\n".join([f"• {p.name}: {p.description}" for p in reg.plugins]) or "No plugins"
-        QMessageBox.information(
-            self,
-            "Plugins",
-            f"Loaded {len(reg.plugins)} plugins:\n\n{names}\n\nUser plugins folder: {Path.home() / '.local' / 'share' / APP_NAME / 'plugins'}",
+        safe_str = "ВКЛЮЧЁН (сторонние плагины заблокированы)" if is_safe_mode() else "ОТКЛЮЧЁН"
+        msg = (
+            f"<b>Безопасность плагинов</b><br/>"
+            f"Safe Mode: <b>{safe_str}</b><br/><br/>"
+            f"⚠️ <i>Внимание: Сторонние плагины исполняются с правами текущего пользователя.</i><br/><br/>"
+            f"Загружено встроенных плагинов: {len(reg.plugins)}<br/>"
         )
+        for p in reg.plugins:
+            msg += f"• <b>{_html.escape(p.name)}</b>: {_html.escape(p.description)}<br/>"
 
-    # ---- Indexer & Hybrid Search Tab ----
+        if reg.loaded_plugin_files:
+            msg += "<br/><b>Сторонние файлы:</b><br/>"
+            for pf in reg.loaded_plugin_files:
+                msg += f"• {pf['name']} (SHA256: {pf['sha256'][:12]}…)<br/>"
+
+        QMessageBox.information(self, "Plugins & Security", msg)
+
+    # ---- Indexer & Asynchronous Non-Blocking Search Tab ----
     def _get_index(self) -> SearchIndex:
         if self._index is None:
             self._index = SearchIndex()
@@ -1261,12 +1276,19 @@ class MainWindow(QMainWindow):
         self._update_index_stats()
 
     def do_search(self):
+        """Неблокирующий асинхронный поиск с отменой устаревших запросов."""
         q = self.ed_query.text().strip()
         self.search_results.clear()
         if not q:
             return
+
         where = self.cmb_search_where.currentData()
         scope = self.cmb_scope.currentData()
+
+        # Прерываем предыдущий активный поиск
+        if self._search_worker and self._search_worker.isRunning():
+            self._search_worker.abort()
+            self._search_worker.wait(80)
 
         if where in ("current", "loaded"):
             chats = [self.file_ctrl.current] if where == "current" else list(self.file_ctrl.chats)
@@ -1274,66 +1296,58 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, APP_NAME, self.tr("open_first"))
                 return
 
-            # Выполняем гибридный поиск (FTS5 + Стемминг + Векторное сходство)
-            hits = self.hybrid_engine.search_chats(chats, q, scope=scope, limit=300)
+            self._search_worker = SearchWorker(
+                mode="hybrid_chats",
+                query=q,
+                chats=chats,
+                scope=scope,
+                hybrid_engine=self.hybrid_engine,
+            )
+        else:
+            idx = self._get_index()
+            self._search_worker = SearchWorker(
+                mode="index",
+                query=q,
+                search_index=idx,
+                scope=scope,
+                where=where,
+            )
+
+        def on_results(hits):
+            self.search_results.clear()
             if not hits:
                 it = QListWidgetItem(self.tr("search_no_results"))
                 it.setFlags(Qt.ItemFlag.NoItemFlags)
                 self.search_results.addItem(it)
                 return
 
+            chats = list(self.file_ctrl.chats)
             for h in hits:
-                icon = "💭" if h.is_thought else ("👤" if h.role == "user" else "🤖")
-                target_chat = next((c for c in chats if c.path == h.chat_path), None)
-                badge = self.file_ctrl.format_badge(target_chat, self.tr) if target_chat else ""
-                score_str = f"[{h.score:.0f}%]"
-                it = QListWidgetItem(f"{icon} {h.chat_title}  ·  {badge}  ·  #{h.msg_num}  {score_str}\n{h.snippet}")
-                it.setToolTip(f"{h.chat_path}\nScore: {h.score} (FTS: {h.fts_score}, Stem: {h.stem_score}, Semantic: {h.semantic_score})")
-                it.setData(Qt.ItemDataRole.UserRole, (h.chat_path, "log"))
+                if hasattr(h, "semantic_score"):
+                    icon = "💭" if h.is_thought else ("👤" if h.role == "user" else "🤖")
+                    target_chat = next((c for c in chats if c.path == h.chat_path), None)
+                    badge = self.file_ctrl.format_badge(target_chat, self.tr) if target_chat else ""
+                    score_str = f"[{h.score:.0f}%]"
+                    it = QListWidgetItem(f"{icon} {h.chat_title}  ·  {badge}  ·  #{h.msg_num}  {score_str}\n{h.snippet}")
+                    it.setToolTip(f"{h.chat_path}\nScore: {h.score}% (FTS: {h.fts_score}, Stem: {h.stem_score})")
+                    it.setData(Qt.ItemDataRole.UserRole, (h.chat_path, "log"))
+                else:
+                    icon = "📄" if h.kind == "txt" else ("💭" if h.is_thought else ("👤" if h.role == "user" else "🤖"))
+                    it = QListWidgetItem(f"{icon} {h.title}  ·  {h.model or '—'}  ·  #{h.msg_num}\n{h.snippet}")
+                    it.setToolTip(h.path)
+                    it.setData(Qt.ItemDataRole.UserRole, (h.path, h.kind))
                 self.search_results.addItem(it)
 
-            self.statusBar().showMessage(self.tr("search_results_n", n=len(hits)), 5000)
-            return
+        def on_done(count, elapsed_ms):
+            self.statusBar().showMessage(f"Найдено: {count} ({elapsed_ms:.1f} мс)", 4000)
 
-        if self._index is None:
-            it = QListWidgetItem(self.tr("search_need_index"))
-            it.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.search_results.addItem(it)
-            return
+        def on_error(err_str):
+            QMessageBox.warning(self, APP_NAME, f"Search error: {err_str}")
 
-        role, thoughts, kind = None, None, None
-        if scope == "user":
-            role, thoughts = "user", False
-        elif scope == "model":
-            role, thoughts = "model", False
-        elif scope == "thoughts":
-            thoughts = True
-
-        if where == "index_txt":
-            kind = "txt"
-        elif where == "index_json":
-            kind = "log"
-
-        try:
-            index_hits = self._index.search(q, role=role, thoughts=thoughts, kind=kind, limit=300)
-        except Exception as ex:
-            QMessageBox.warning(self, APP_NAME, str(ex))
-            return
-
-        if not index_hits:
-            it = QListWidgetItem(self.tr("search_no_results"))
-            it.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.search_results.addItem(it)
-            return
-
-        for h in index_hits:
-            icon = "📄" if h.kind == "txt" else ("💭" if h.is_thought else ("👤" if h.role == "user" else "🤖"))
-            it = QListWidgetItem(f"{icon} {h.title}  ·  {h.model or '—'}  ·  #{h.msg_num}\n{h.snippet}")
-            it.setToolTip(h.path)
-            it.setData(Qt.ItemDataRole.UserRole, (h.path, h.kind))
-            self.search_results.addItem(it)
-
-        self.statusBar().showMessage(self.tr("search_results_n", n=len(index_hits)), 5000)
+        self._search_worker.resultsReady.connect(on_results)
+        self._search_worker.searchFinished.connect(on_done)
+        self._search_worker.searchError.connect(on_error)
+        self._search_worker.start()
 
     def _open_search_hit(self, item: QListWidgetItem):
         data = item.data(Qt.ItemDataRole.UserRole)

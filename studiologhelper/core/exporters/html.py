@@ -6,6 +6,7 @@ import html as _html
 from .base import CONTENT_THOUGHTS, THOUGHTS_INCLUDE, THOUGHTS_SEPARATE
 from .txt import _iter_export_messages, _msg_label
 from ..markdown import markdown_to_html
+from ..security import sanitize_url
 
 HTML_CSS = """
 :root {
@@ -133,7 +134,8 @@ class HtmlExporter:
             if opts.attachments and msg.attachments:
                 for a in msg.attachments:
                     if a.url:
-                        out.append(f"<span class='att'>📎 <a href='{_html.escape(a.url, quote=True)}' target='_blank'>{_html.escape(a.label_key)}</a></span>")
+                        safe_url = sanitize_url(a.url)
+                        out.append(f"<span class='att'>📎 <a href='{_html.escape(safe_url, quote=True)}' target='_blank' rel='noopener noreferrer'>{_html.escape(a.label_key)}</a></span>")
                     else:
                         out.append(f"<span class='att'>📎 {_html.escape(a.label_key)}</span>")
 

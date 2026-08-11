@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "studiologhelper"
+version = "2.1.0"
+description = "Desktop (PyQt6) and CLI helper for Google AI Studio logs, Arena AI logs, and clean reading/exporting"
+readme = "README.md"
+authors = [
+    { name = "StudioLogHelper Team" }
+]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+keywords = ["ai-studio", "gemini", "logs", "chat-parser", "pyqt6", "reader", "exporter"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Markup",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "PyQt6>=6.6",
+]
+
+[project.optional-dependencies]
+fast = [
+    "orjson>=3.9",
+    "ijson>=3.1",
+    "markdown>=3.6",
+]
+test = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+]
+all = [
+    "orjson>=3.9",
+    "ijson>=3.1",
+    "markdown>=3.6",
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+]
+
+[project.scripts]
+studiologhelper = "studiologhelper.ui.app:main"
+slh = "studiologhelper.cli.commands:main"
+
+[tool.setuptools.packages.find]
+include = ["studiologhelper*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --strict-markers"

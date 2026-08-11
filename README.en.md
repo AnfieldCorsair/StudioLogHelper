@@ -1,41 +1,42 @@
-# StudioLogHelper 2.0 (PyQt6)
+# StudioLogHelper 2.1.0 (PyQt6)
 
-Desktop app and CLI utility for parsing, viewing, deep reading, searching, and exporting AI chat logs from **Google AI Studio** (including extensionless JSON files from Google Drive), **Arena AI**, and cleaned TXT/MD logs.
+Desktop application and CLI utility for parsing, reading, searching, and exporting AI chat logs from **Google AI Studio** (including extensionless JSON files downloaded from Google Drive), **Arena AI plain-text exports**, and cleaned TXT/MD logs.
 
 ---
 
-## What's New in Version 2.0
+## Key Features
 
 ### 📖 Book Reading Mode & Typography
-- **Distraction-Free Reading:** Formats conversations into a structured book with clean chapter headers and customizable column widths (`740px`, `920px`, `100%`).
+- **Comfortable Reading:** Formats conversations into a structured book with clean chapter headers and customizable column widths (`740px`, `920px`, `100%`).
 - **Reading Palettes:**
   - 📜 **Warm Paper (Solarized Warm):** background `#fdf6e3`, soft text `#43525a`, accent `#b58900`.
   - 🕰 **Vintage Sepia:** background `#f4ecd8`, warm text `#3c2f1f`.
-  - 🌙 **Night Reading (Soft OLED):** gentle night dark `#191a21`, text `#d0d3dc`.
+  - 🌙 **Night Reading (Soft OLED):** gentle dark `#191a21`, text `#d0d3dc`.
   - ☀️ **Light** & 🌑 **Dark** modes.
 - **Typography Controls:** Serif (`Georgia`, `Noto Serif`, `Merriweather`), Sans-serif, Monospace fonts; line height presets (`1.4x`, `1.7x`, `2.0x`); instant zoom `A−` / `A+`.
 - **Navigation:** Block jumping with `Ctrl+Up` / `Ctrl+Down`, Table of Contents (TOC) with role badges and snippet previews.
 
 ### 🖍 Interactive Quotes & Highlighter
-- Select any text with your mouse and highlight with colored markers: 🟡 **Yellow**, 🟢 **Green**, 🌸 **Pink**, 🔵 **Blue**.
+- Select text with the cursor and highlight with colored markers: 🟡 **Yellow**, 🟢 **Green**, 🌸 **Pink**, 🔵 **Blue**.
 - Attach custom user notes to quotes and bookmarks (`Ctrl+B`).
 - Saved in `.slh.json` project metadata with one-click Markdown summary export.
 
 ### 🔎 Hybrid Search Engine (FTS5 + Stemming + Local Embeddings)
 - **Lexical Index:** Fast SQLite FTS5 (BM25) over indexed folders.
 - **Morphological Stemmer (RU/EN):** Porter stemmer matches inflected word forms (searching for `cooking` finds `cook`, `cooked`, `cooks`; Russian `сковородка` finds `сковорода`, `сковороду`, `сковороде`).
-- **Subword Dense Embeddings:** Local n-gram cosine similarity provides semantic and fuzzy ranking without large AI dependencies.
-- Exact phrase search in quotes (`"exact phrase"`) and wildcard prefix queries (`term*`).
+- **Subword Dense Embeddings:** Local n-gram cosine similarity provides typo-tolerant ranking without heavy external AI dependencies.
+- **Asynchronous Non-blocking Worker:** Background query execution with real-time cancellation of obsolete searches and input debouncing.
 
 ### 🗃 Hierarchical Categories & Auto-save
 - **Nested Categories:** Support for subcategories such as `Work/Research/Gemini`, `Work/Code`, `Personal/Notes` with subtree filtering.
-- **Project Auto-save:** Real-time, non-blocking auto-save for tags, notes, categories, and highlights into `.slh.json`.
+- **Atomic Project Auto-save:** Non-blocking debounced saving via temporary files and `fsync` with automatic `.bak` backups.
+- **Project Portability:** Relative path resolution (`rel_path`) allows copying project directories across computers without losing linked files.
 - **Undo / Redo:** Multi-level command stack (`Ctrl+Z` / `Ctrl+Y`).
 
-### ⚡ Performance & Hardware Virtualization
-- **0% Idle CPU & 60 FPS Scrolling:** Unified C++ accelerated canvas and `QListView` virtualization for 10,000+ message logs.
-- **Lazy Tab Rendering:** Zero lag when toggling filters or checkboxes; only the visible tab is rendered.
-- **Network Leak Protection:** Markdown images are sanitized to safe badges, preventing synchronous network stalls.
+### 🛡 Security & Plugins
+- **HTML Sanitization:** Built-in XSS protection, stripping of dangerous tags and `javascript:` protocols.
+- **Safe External Links:** Automatic injection of `rel="noopener noreferrer"`.
+- **Plugin Safe Mode:** Safe mode flag `--safe-mode` / `--disable-plugins` to prevent loading arbitrary third-party code. Experimental parsers for other formats are isolated as plugins.
 
 ---
 
@@ -46,6 +47,15 @@ pip install -r requirements.txt
 python app.py
 # or
 python -m studiologhelper.ui.app
+```
+
+Install as a package:
+
+```bash
+pip install .
+studiologhelper
+# or CLI
+slh --help
 ```
 
 ### CLI Usage:

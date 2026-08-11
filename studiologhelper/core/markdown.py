@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Оптимизированный Markdown -> HTML с защитой от сетевых запросов и зависаний."""
+"""Оптимизированный Markdown -> HTML с защитой от XSS, санитизацией и блокировкой внешних загрузок."""
 
 from __future__ import annotations
 
 import html as _html
 import re
 
-# Precompile all regex once
+from .security import sanitize_html, sanitize_url
+
 RE_IMG = re.compile(r"!\[([^\]]*)\]\((https?://[^\s)]+)\)")
 RE_BOLD = re.compile(r"\*\*(.+?)\*\*")
 RE_ITALIC = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
@@ -23,13 +24,10 @@ try:
     import markdown as _md_lib
 
     def _safe_md_lib(text: str) -> str:
-        # Заменяем ![alt](url) на безопасный бейдж до парсинга библиотекой markdown,
-        # чтобы Qt не пытался скачивать изображения по сети и не блокировал интерфейс/интернет
         safe_text = RE_IMG.sub(r"📎 [\1](\2)", text)
         html_out = _md_lib.markdown(safe_text, extensions=["fenced_code", "tables", "nl2br"])
-        # Дополнительно удаляем любые оставшиеся теги <img ...>
         html_out = re.sub(r'<img\s+[^>]*src=["\'][^"\']*["\'][^>]*>', r'📎 [Изображение]', html_out, flags=re.IGNORECASE)
-        return html_out
+        return sanitize_html(html_out)
 
     HAS_MARKDOWN_LIB = True
 except ImportError:
@@ -38,13 +36,18 @@ except ImportError:
 
 
 def _inline_md(escaped: str) -> str:
-    # Заменяем изображения на безопасные бейджи
     escaped = RE_IMG.sub(r"📎 [\1](\2)", escaped)
     escaped = RE_CODE.sub(r"<code>\1</code>", escaped)
     escaped = RE_BOLD.sub(r"<b>\1</b>", escaped)
     escaped = RE_ITALIC.sub(r"<i>\1</i>", escaped)
     escaped = RE_STRIKE.sub(r"<s>\1</s>", escaped)
-    escaped = RE_LINK.sub(r'<a href="\2">\1</a>', escaped)
+
+    def replace_link(m: re.Match) -> str:
+        label = m.group(1)
+        url = sanitize_url(m.group(2))
+        return f'<a href="{url}" rel="noopener noreferrer">{label}</a>'
+
+    escaped = RE_LINK.sub(replace_link, escaped)
     return escaped
 
 
@@ -131,7 +134,6 @@ def markdown_to_html_builtin(text: str) -> str:
             i += 1
             continue
 
-        # paragraph — collect consecutive non-special lines
         para = [stripped]
         i += 1
         while i < len(lines):
@@ -146,11 +148,12 @@ def markdown_to_html_builtin(text: str) -> str:
     if in_code and code_buf:
         out.append(f"<pre><code>{_html.escape(chr(10).join(code_buf))}</code></pre>")
     close_lists()
-    return "\n".join(out)
+    raw_html = "\n".join(out)
+    return sanitize_html(raw_html)
 
 
 def markdown_to_html(text: str) -> str:
-    """Main entry — uses safe markdown lib if available, otherwise fast builtin."""
+    """Безопасная конвертация Markdown в HTML с обязательной санитизацией."""
     if not text:
         return ""
     if HAS_MARKDOWN_LIB and len(text) > 500:

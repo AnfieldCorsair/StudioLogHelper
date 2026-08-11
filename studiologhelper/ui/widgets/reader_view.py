@@ -7,7 +7,7 @@ import html as _html
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QPoint, QRect, QSettings, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
@@ -52,7 +52,7 @@ from ...core.markdown import markdown_to_html
 from ...core.models import ChatLog, Message
 from ...core.parsers.parser import parse_file
 from ...core.parsers.text_parser import parse_text_log
-from ...core.project import HIGHLIGHT_COLORS
+from ...core.project import HIGHLIGHT_COLORS, compute_text_hash
 from ...indexer.stemmer import match_stemmed_query
 from ..controllers.project_controller import ProjectController
 from ..themes import THEMES
@@ -435,54 +435,80 @@ class ReaderView(QWidget):
 
     def _apply_highlights_to_text(self, text: str, highlights: List[Dict[str, Any]], is_markdown: bool) -> str:
         """
-        Применяет маркеры к тексту. Для сохранения Markdown-разметки и порядка
-        выделения сортируются с конца строки к началу.
+        Применяет маркеры к тексту с гарантией HTML-экранирования всех фрагментов
+        и предотвращением конфликтов между разными цитатами.
         """
         if not highlights or not text:
             return markdown_to_html(text) if is_markdown else _html.escape(text).replace("\n", "<br/>")
 
-        # Находим вхождения цитат
-        spans_to_mark: List[Tuple[int, int, str, str]] = []
+        # 1. Поиск точных непересекающихся диапазонов в тексте
+        resolved_spans: List[Tuple[int, int, str, str, str]] = []  # start, end, color_key, note, quote
+        occupied_indices: Set[int] = set()
+
         for h in highlights:
             quote = h.get("quote", "").strip()
             if not quote:
                 continue
             color_key = h.get("color", "yellow")
             note = h.get("note", "")
+            start = h.get("start", 0)
+            end = h.get("end", 0)
 
-            # Ищем позицию цитаты в исходном тексте
-            pos = text.find(quote)
-            if pos >= 0:
-                spans_to_mark.append((pos, pos + len(quote), color_key, note))
+            # Проверяем совпадение по сохранённым start/end
+            if 0 <= start < end <= len(text) and text[start:end] == quote:
+                span_range = set(range(start, end))
+                if not (span_range & occupied_indices):
+                    resolved_spans.append((start, end, color_key, note, quote))
+                    occupied_indices.update(span_range)
+                    continue
 
-        # Сортируем с конца к началу, чтобы не сдвигать индексы
-        spans_to_mark.sort(key=lambda s: s[0], reverse=True)
+            # Иначе ищем первое свободное вхождение
+            search_start = 0
+            while True:
+                pos = text.find(quote, search_start)
+                if pos < 0:
+                    break
+                candidate_range = set(range(pos, pos + len(quote)))
+                if not (candidate_range & occupied_indices):
+                    resolved_spans.append((pos, pos + len(quote), color_key, note, quote))
+                    occupied_indices.update(candidate_range)
+                    break
+                search_start = pos + 1
+
+        # Сортируем диапазоны по возрастанию начальной позиции
+        resolved_spans.sort(key=lambda s: s[0])
 
         if not is_markdown:
-            # Для plain-text режима: экранируем и вставляем <mark>
-            res = text
-            for start, end, color_key, note in spans_to_mark:
+            # Plain-text режим: сегментная сборка с полным HTML-экранированием
+            pieces: List[str] = []
+            last_idx = 0
+            for s_start, s_end, color_key, note, quote in resolved_spans:
+                if s_start > last_idx:
+                    pieces.append(_html.escape(text[last_idx:s_start]))
                 c_info = HIGHLIGHT_COLORS.get(color_key, HIGHLIGHT_COLORS["yellow"])
                 bg_hex = c_info["hex"]
                 fg_hex = c_info["text"]
                 note_attr = f' title="{_html.escape(note)}"' if note else ""
-                escaped_quote = _html.escape(res[start:end])
-                tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;"{note_attr}>{escaped_quote}</mark>'
-                res = res[:start] + tag + res[end:]
-            return res.replace("\n", "<br/>")
+                mark_text = _html.escape(text[s_start:s_end])
+                pieces.append(f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;"{note_attr}>{mark_text}</mark>')
+                last_idx = s_end
+            if last_idx < len(text):
+                pieces.append(_html.escape(text[last_idx:]))
+            return "".join(pieces).replace("\n", "<br/>")
+
         else:
-            # Для Markdown: сначала рендерим Markdown, затем подсвечиваем безопасные цитаты
+            # Markdown режим: получаем безопасный HTML и производим однозначную токенизированную замену
             html_out = markdown_to_html(text)
-            for _, _, color_key, note in spans_to_mark:
+            for _, _, color_key, note, quote in resolved_spans:
                 c_info = HIGHLIGHT_COLORS.get(color_key, HIGHLIGHT_COLORS["yellow"])
                 bg_hex = c_info["hex"]
                 fg_hex = c_info["text"]
-                for h in highlights:
-                    q = h.get("quote", "").strip()
-                    if q and q in html_out:
-                        note_attr = f' title="{_html.escape(note)}"' if note else ""
-                        tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;"{note_attr}>{_html.escape(q)}</mark>'
-                        html_out = html_out.replace(q, tag, 1)
+                note_attr = f' title="{_html.escape(note)}"' if note else ""
+                escaped_quote = _html.escape(quote)
+                tag = f'<mark style="background-color: {bg_hex}; color: {fg_hex}; padding: 2px 4px; border-radius: 4px; font-weight: 500;"{note_attr}>{escaped_quote}</mark>'
+                # Заменяем только первое совпадение
+                if escaped_quote in html_out:
+                    html_out = html_out.replace(escaped_quote, tag, 1)
             return html_out
 
     def rebuild_view(self):
@@ -763,8 +789,13 @@ class ReaderView(QWidget):
 
         path = self.current_chat.path
         target_num = self._current_block_num
-        start = cursor.selectionStart()
-        end = cursor.selectionEnd()
+        target_block = next((b for b in self.blocks if b.num == target_num), None)
+        source_text = target_block.text if target_block else ""
+
+        # Вычисляем относительные координаты внутри текста целевого блока
+        rel_pos = source_text.find(quote)
+        start = rel_pos if rel_pos >= 0 else 0
+        end = (rel_pos + len(quote)) if rel_pos >= 0 else len(quote)
 
         note, ok = QInputDialog.getText(
             self,
@@ -774,9 +805,6 @@ class ReaderView(QWidget):
         )
         if not ok:
             return
-
-        target_block = next((b for b in self.blocks if b.num == target_num), None)
-        source_text = target_block.text if target_block else ""
 
         self.project_ctrl.add_highlight(
             path=path,

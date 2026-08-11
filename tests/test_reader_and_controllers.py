@@ -14,8 +14,8 @@ from studiologhelper.i18n.translator import Translator
 from studiologhelper.indexer.stemmer import match_stemmed_query, stem_ru, stem_en, stem_word
 from studiologhelper.indexer.hybrid_search import (
     HybridSearchEngine,
-    compute_subword_vector,
-    cosine_similarity,
+    get_subword_vector,
+    cosine_similarity_tuple,
 )
 from studiologhelper.ui.controllers.project_controller import ProjectController
 from studiologhelper.ui.controllers.file_list_controller import FileListController

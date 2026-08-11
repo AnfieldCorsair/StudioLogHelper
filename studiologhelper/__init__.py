@@ -1,2 +1,3 @@
-__version__ = "2.0.0"
+# -*- coding: utf-8 -*-
+__version__ = "2.1.0"
 __app_name__ = "StudioLogHelper"

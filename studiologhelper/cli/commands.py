@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ..core.exporters.base import ExportOptions
 from ..core.parsers.parser import parse_file
+from ..core.plugins import set_safe_mode
 from ..core.scanner import scan_folder
 from ..core.exceptions import ParseError
 from ..i18n.translator import Translator, LANGS, DEFAULT_LANG
@@ -13,6 +14,13 @@ from ..indexer import SearchIndex
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="StudioLogHelper — parser for AI Studio logs")
+    p.add_argument(
+        "--safe-mode",
+        "--disable-plugins",
+        action="store_true",
+        dest="safe_mode",
+        help="Run without executing third-party user plugins",
+    )
     sub = p.add_subparsers(dest="cmd")
 
     pe = sub.add_parser("export", help="Parse/export")
@@ -186,9 +194,12 @@ def cmd_stats(args) -> int:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] not in ("export", "index", "search", "stats", "-h", "--help"):
+    if argv and argv[0] not in ("export", "index", "search", "stats", "-h", "--help", "--safe-mode", "--disable-plugins"):
         argv.insert(0, "export")
     args = build_parser().parse_args(argv)
+    if getattr(args, "safe_mode", False):
+        set_safe_mode(True)
+
     if args.cmd == "export":
         return cmd_export(args)
     if args.cmd == "index":
