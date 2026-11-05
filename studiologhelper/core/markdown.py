@@ -9,6 +9,7 @@ import re
 from .security import sanitize_html, sanitize_url
 
 RE_IMG = re.compile(r"!\[([^\]]*)\]\((https?://[^\s)]+)\)")
+RE_IMG_TAG = re.compile(r'<img\s+[^>]*src=["\'][^"\']*["\'][^>]*>', re.IGNORECASE)
 RE_BOLD = re.compile(r"\*\*(.+?)\*\*")
 RE_ITALIC = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
 RE_CODE = re.compile(r"`([^`]+)`")
@@ -26,7 +27,7 @@ try:
     def _safe_md_lib(text: str) -> str:
         safe_text = RE_IMG.sub(r"📎 [\1](\2)", text)
         html_out = _md_lib.markdown(safe_text, extensions=["fenced_code", "tables", "nl2br"])
-        html_out = re.sub(r'<img\s+[^>]*src=["\'][^"\']*["\'][^>]*>', r'📎 [Изображение]', html_out, flags=re.IGNORECASE)
+        html_out = RE_IMG_TAG.sub(r'📎 [Изображение]', html_out)
         return sanitize_html(html_out)
 
     HAS_MARKDOWN_LIB = True

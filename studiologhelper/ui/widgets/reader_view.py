@@ -99,6 +99,15 @@ class ReaderView(QWidget):
         self._current_block_num: int = 1
         self._dirty: bool = True
 
+        # Кэш body-HTML блоков: markdown/escape/highlights не зависят от темы и
+        # шрифта — переиспользуются при смене настроек (A+/A−, тема, интервал).
+        self._body_cache: Dict[Tuple, str] = {}
+        # Debounce перерисовки: быстрые клики A+/A− не строят HTML на каждый клик
+        self._rebuild_timer = QTimer(self)
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.setInterval(120)
+        self._rebuild_timer.timeout.connect(self.rebuild_view)
+
         # Reader Settings
         self.reader_theme_name = self.settings.value("reader/theme", "reading_warm")
         self.font_preset = self.settings.value("reader/font_family", "serif")
@@ -389,6 +398,7 @@ class ReaderView(QWidget):
 
     def _load_blocks_from_chat(self):
         self.blocks.clear()
+        self._body_cache.clear()  # тексты/цитаты изменились — кэш body недействителен
         if not self.current_chat:
             return
 
@@ -396,11 +406,17 @@ class ReaderView(QWidget):
         bms = self.project_ctrl.get_bookmarks(path)
         hls = self.project_ctrl.get_highlights(path)
 
+        # O(n+m) через карты вместо линейного сканирования на каждый блок
+        bm_nums = {b.get("block_num") for b in bms}
+        hl_map: Dict[int, List[Dict[str, Any]]] = {}
+        for h in hls:
+            hl_map.setdefault(h.get("block_num"), []).append(h)
+
         def get_block_highlights(num: int) -> List[Dict[str, Any]]:
-            return [h for h in hls if h.get("block_num") == num]
+            return hl_map.get(num, [])
 
         def is_block_bm(num: int) -> bool:
-            return any(b.get("block_num") == num for b in bms)
+            return num in bm_nums
 
         if self.current_chat.system_instruction:
             self.blocks.append(
@@ -511,7 +527,43 @@ class ReaderView(QWidget):
                     html_out = html_out.replace(escaped_quote, tag, 1)
             return html_out
 
+    def _render_body(self, b: ReaderBlock, is_md: bool) -> str:
+        """HTML тела блока с кэшированием (не зависит от темы/шрифта)."""
+        if not b.text:
+            return f"<i>{self._tr('empty_message')}</i>"
+
+        if b.highlights:
+            hl_sig = tuple(
+                (h.get("color"), h.get("note"), h.get("start"), h.get("end"), h.get("quote"))
+                for h in b.highlights
+            )
+        else:
+            hl_sig = ()
+
+        # id(text) стабилен: blocks держат ссылки, кэш очищается при _load_blocks_from_chat
+        key = (id(b.text), len(b.text), is_md, hl_sig)
+        cached = self._body_cache.get(key)
+        if cached is not None:
+            return cached
+
+        if b.highlights:
+            body = self._apply_highlights_to_text(b.text, b.highlights, is_md)
+        elif is_md:
+            body = markdown_to_html(b.text)
+        else:
+            body = _html.escape(b.text).replace("\n", "<br/>")
+
+        if len(self._body_cache) > 400:
+            self._body_cache.clear()
+        self._body_cache[key] = body
+        return body
+
+    def _schedule_rebuild(self):
+        """Debounce перерисовки: серия кликов A+/A−/тема собирается в одну."""
+        self._rebuild_timer.start()
+
     def rebuild_view(self):
+        self._rebuild_timer.stop()  # отменяем отложенную перерисовку, если она была
         if not self.blocks:
             self.browser.setHtml(
                 f"<div style='text-align:center; padding: 40px; color: #888888;'><h3>{self._tr('list_empty')}</h3></div>"
@@ -679,14 +731,10 @@ class ReaderView(QWidget):
                 att_items = "".join(f"<div>📎 {_html.escape(a)}</div>" for a in b.attachments)
                 att_html = f"<div style='color:{muted_color}; margin-bottom:8px; font-size:10pt;'>{att_items}</div>"
 
-            # Body text with Highlights
+            # Body text with Highlights (кэшируется: markdown/escape не зависят
+            # от темы и шрифта — пересобирается только при смене блоков/цитат)
             is_md = self.render_md and not is_user
-            if b.highlights:
-                body_content = self._apply_highlights_to_text(b.text, b.highlights, is_md)
-            elif is_md:
-                body_content = markdown_to_html(b.text)
-            else:
-                body_content = _html.escape(b.text).replace("\n", "<br/>") if b.text else f"<i>{self._tr('empty_message')}</i>"
+            body_content = self._render_body(b, is_md)
 
             block_html = f"""
             <div class='{card_cls}'>
@@ -875,28 +923,28 @@ class ReaderView(QWidget):
     def _on_theme_changed(self):
         self.reader_theme_name = self.cmb_theme.currentData()
         self.settings.setValue("reader/theme", self.reader_theme_name)
-        self.rebuild_view()
+        self._schedule_rebuild()
 
     def _on_font_changed(self):
         self.font_preset = self.cmb_font.currentData()
         self.settings.setValue("reader/font_family", self.font_preset)
-        self.rebuild_view()
+        self._schedule_rebuild()
 
     def _change_font_size(self, delta: float):
         self.font_size_pt = max(9.0, min(32.0, self.font_size_pt + delta))
         self.settings.setValue("reader/font_size", self.font_size_pt)
         self.lbl_fs.setText(f"{self.font_size_pt:.0f}pt")
-        self.rebuild_view()
+        self._schedule_rebuild()
 
     def _on_lh_changed(self):
         self.line_height = float(self.cmb_lh.currentData() or 1.7)
         self.settings.setValue("reader/line_height", self.line_height)
-        self.rebuild_view()
+        self._schedule_rebuild()
 
     def _on_width_changed(self):
         self.content_width_mode = self.cmb_width.currentData()
         self.settings.setValue("reader/width_mode", self.content_width_mode)
-        self.rebuild_view()
+        self._schedule_rebuild()
 
     # ---- Smart Stemmed Search ----
     def _on_search_text_changed(self, txt: str):

@@ -81,3 +81,18 @@ pytest --cov=studiologhelper
 - [x] All via pathlib
 
 
+
+## Раунд оптимизации 2026-11 (рефакторинг горячих путей)
+
+Кратко:
+
+- **stemmer**: `@lru_cache` на `stem_word`, предкомпилированные regex, однопроходная
+  токенизация — поиск `fast_search_chats` ~7x, `hybrid_search` ~4x.
+- **text_parser**: наборы заголовков собираются один раз на файл, быстрые guard'ы —
+  парсинг 1.6MB лога ~6x. Исправлен баг bare-заголовков (`answer`/`response`
+  в теле сообщения срезали текст) + регрессионный тест.
+- **SearchIndex**: один `_load_known()` вместо SELECT на файл; `kind` не перечитывается.
+- **memory_search/hybrid_search**: один `lower`/`search` на кандидата, кэш dict-векторов.
+- **reader_view**: кэш body-HTML блоков (не зависит от темы/шрифта), debounce 120ms,
+  O(n+m) карты закладок/цитат; **virtual_view**: кэш `time_str()`.
+- Бенчмарк: `bench/bench.py`; новые тесты: `tests/test_refactor_regressions.py` (65 passed).

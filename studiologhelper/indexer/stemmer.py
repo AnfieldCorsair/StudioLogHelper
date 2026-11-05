@@ -5,14 +5,22 @@
 Реализует алгоритм Портера (Snowball Stemmer) для русского и английского языков
 с дополнительной обработкой диминутивов и префиксов, позволяя находить:
 «сковородка» -> «сковорода», «сковородку», «сковородой», «сковороде».
+
+Оптимизации (рефакторинг 2026):
+- Все regex предкомпилированы на уровне модуля.
+- stem_word кэшируется через lru_cache (словарь повторяется в корпусе огромное
+  число раз — стемминг одного и того же слова выполняется один раз).
+- match_stemmed_query: однопроходная токенизация с заранее вычисленными
+  нижними регистрами и стеммами; str.find вместо regex для точных фраз.
 """
 
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import List, Set, Tuple
 
-# ---- Русский стеммер Портера ----
+# ---- Предкомпилированные регулярные выражения ----
 _RU_PERFECTIVE_GERUND = re.compile(
     r"((ив|ивши|ившись|ыв|ывши|ывшись)|((?<=[ая])(в|вши|вшись)))$"
 )
@@ -32,15 +40,31 @@ _RU_NOUN = re.compile(
 _RU_SUPERLATIVE = re.compile(r"(ейш|ейше)$")
 _RU_DERIVATIONAL = re.compile(r"[^аеиоуыэюя]+(ост|ость)$")
 
+# Диминутивные суффиксы (сковородка -> сковород, книжка -> книж)
+_RU_DIMINUTIVE = re.compile(r"к[а-я]{1,3}$")
+_RU_VOWEL = re.compile(r"[аеиоуыэюя]")
+_RU_I_END = re.compile(r"и$")
+_RU_SOFT_END = re.compile(r"ь$")
+_RU_DOUBLE_N = re.compile(r"нн$")
+
+# Общие паттерны
+_RE_CLEAN_WORD = re.compile(r"[^\wА-Яа-яЁёa-zA-Z0-9_-]")
+_RE_HAS_RU = re.compile(r"[а-яё]")
+_RE_HAS_EN = re.compile(r"[a-z]")
+_RE_TOKEN = re.compile(r"[A-Za-zА-Яа-яЁё0-9_]+")
+_RE_SPACES = re.compile(r"\s+")
+_RE_QUOTED = re.compile(r'"([^"]+)"')
+_RE_QUOTED_REM = re.compile(r'"[^"]+"')
+
 
 def stem_ru(word: str) -> str:
     """Стемминг русского слова по Портеру + нормализация."""
     w = word.lower().replace("ё", "е")
     # Диминутивные суффиксы (сковородка -> сковород, книжка -> книж)
     if len(w) > 5 and w.endswith(("ка", "ку", "ке", "ки", "кой", "ком", "кам", "ками", "ках")):
-        w = re.sub(r"к[а-я]{1,3}$", "", w)
+        w = _RU_DIMINUTIVE.sub("", w)
 
-    m = re.search(r"[аеиоуыэюя]", w)
+    m = _RU_VOWEL.search(w)
     if not m:
         return w
     rv_pos = m.end()
@@ -65,13 +89,13 @@ def stem_ru(word: str) -> str:
                 rv = _RU_NOUN.sub("", rv, count=1)
 
     # Шаг 2: удаление 'и' на конце
-    rv = re.sub(r"и$", "", rv)
+    rv = _RU_I_END.sub("", rv)
     # Шаг 3: деривативные суффиксы
     rv = _RU_DERIVATIONAL.sub("", rv)
     # Шаг 4: удаление мягкого знака, превосходной степени, нн -> н
-    rv = re.sub(r"ь$", "", rv)
+    rv = _RU_SOFT_END.sub("", rv)
     rv = _RU_SUPERLATIVE.sub("", rv)
-    rv = re.sub(r"нн$", "н", rv)
+    rv = _RU_DOUBLE_N.sub("н", rv)
 
     return head + rv
 
@@ -113,24 +137,25 @@ def stem_en(word: str) -> str:
     return w
 
 
+@lru_cache(maxsize=65536)
 def stem_word(word: str) -> str:
-    """Универсальный стемминг слова (автоопределение RU/EN)."""
-    cleaned = re.sub(r"[^\wА-Яа-яЁёa-zA-Z0-9_-]", "", word).strip().lower()
+    """Универсальный стемминг слова (автоопределение RU/EN).
+
+    Результат кэшируется: повторные слова (частые в корпусе) стеммятся один раз.
+    """
+    cleaned = _RE_CLEAN_WORD.sub("", word).strip().lower()
     if not cleaned:
         return ""
-    if re.search(r"[а-яё]", cleaned):
+    if _RE_HAS_RU.search(cleaned):
         return stem_ru(cleaned)
-    elif re.search(r"[a-z]", cleaned):
+    elif _RE_HAS_EN.search(cleaned):
         return stem_en(cleaned)
     return cleaned
 
 
 def tokenize_words(text: str) -> List[Tuple[str, int, int]]:
     """Разбивает текст на слова с их начальными и конечными позициями."""
-    tokens: List[Tuple[str, int, int]] = []
-    for m in re.finditer(r"[A-Za-zА-Яа-яЁё0-9_]+", text):
-        tokens.append((m.group(0), m.start(), m.end()))
-    return tokens
+    return [(m.group(0), m.start(), m.end()) for m in _RE_TOKEN.finditer(text)]
 
 
 def get_stems_set(text: str) -> Set[str]:
@@ -154,9 +179,9 @@ def match_stemmed_query(query: str, text: str) -> Tuple[bool, int, List[Tuple[in
     spans: List[Tuple[int, int]] = []
     score = 0
 
-    # 1. Поиск точных фраз в кавычках: "some phrase"
-    exact_phrases = re.findall(r'"([^"]+)"', q_clean)
-    remaining_query = re.sub(r'"[^"]+"', "", q_clean).strip()
+    # 1. Поиск точных фраз в кавычках: "some phrase" (str.find — быстрее regex)
+    exact_phrases = _RE_QUOTED.findall(q_clean)
+    remaining_query = _RE_QUOTED_REM.sub("", q_clean).strip()
 
     for phrase in exact_phrases:
         p_low = phrase.lower().strip()
@@ -176,12 +201,15 @@ def match_stemmed_query(query: str, text: str) -> Tuple[bool, int, List[Tuple[in
             return False, 0, []
 
     # 2. Поиск отдельных термов запроса
-    raw_terms = [t for t in re.split(r"\s+", remaining_query) if t.strip()]
+    raw_terms = [t for t in _RE_SPACES.split(remaining_query) if t.strip()]
     if not raw_terms and exact_phrases:
         return True, score, spans
 
-    text_tokens = tokenize_words(text)
-    token_stems = [(tok, start, end, stem_word(tok)) for tok, start, end in text_tokens]
+    # Однопроходная токенизация: нижний регистр + стемм вычисляются один раз на токен
+    token_stems = [
+        (m.group(0).lower(), m.start(), m.end(), stem_word(m.group(0)))
+        for m in _RE_TOKEN.finditer(text)
+    ]
 
     all_terms_matched = True
     for term in raw_terms:
@@ -192,11 +220,10 @@ def match_stemmed_query(query: str, text: str) -> Tuple[bool, int, List[Tuple[in
         is_prefix = term_clean.endswith("*")
         pure_term = term_clean.rstrip("*")
         term_stem = stem_word(pure_term)
+        term_stem_len = len(term_stem)
 
         term_matched = False
-        for tok_str, start, end, tok_stem in token_stems:
-            tok_low = tok_str.lower()
-
+        for tok_low, start, end, tok_stem in token_stems:
             if tok_low == pure_term:
                 spans.append((start, end))
                 score += 5
@@ -205,7 +232,7 @@ def match_stemmed_query(query: str, text: str) -> Tuple[bool, int, List[Tuple[in
                 spans.append((start, end))
                 score += 3
                 term_matched = True
-            elif len(term_stem) >= 3 and len(tok_stem) >= 3:
+            elif term_stem_len >= 3 and len(tok_stem) >= 3:
                 if tok_stem == term_stem or tok_stem.startswith(term_stem) or term_stem.startswith(tok_stem):
                     spans.append((start, end))
                     score += 4

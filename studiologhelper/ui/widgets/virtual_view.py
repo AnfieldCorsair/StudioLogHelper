@@ -101,6 +101,18 @@ class MessageDelegate(QStyledItemDelegate):
         self.tr = tr_func or (lambda k, **kw: k)
         self._size_cache = {}
         self._doc_cache = {}
+        self._time_cache = {}  # create_time -> formatted (datetime парсится один раз)
+
+    def _msg_time_str(self, msg) -> str:
+        """Кэшированный msg.time_str() — ISO-парсинг не выполняется на каждый paint."""
+        key = msg.create_time
+        cached = self._time_cache.get(key)
+        if cached is None:
+            if len(self._time_cache) > 2000:
+                self._time_cache.clear()
+            cached = msg.time_str()
+            self._time_cache[key] = cached
+        return cached
 
     def _get_doc(self, text: str, rich: bool, width: int) -> QTextDocument:
         key = (hash(text[:400]), rich, width, len(text))
@@ -162,8 +174,9 @@ class MessageDelegate(QStyledItemDelegate):
         if msg.token_count:
             painter.drawText(QRect(extra_x, header_rect.y(), 80, header_rect.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, f"{msg.token_count} {self.tr('tokens_short')}")
             extra_x += 80
-        if msg.time_str():
-            painter.drawText(QRect(extra_x, header_rect.y(), 140, header_rect.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, msg.time_str())
+        time_str = self._msg_time_str(msg)
+        if time_str:
+            painter.drawText(QRect(extra_x, header_rect.y(), 140, header_rect.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, time_str)
 
         y = header_rect.bottom() + 8
 
@@ -279,6 +292,7 @@ class MessageDelegate(QStyledItemDelegate):
     def clear_cache(self):
         self._size_cache.clear()
         self._doc_cache.clear()
+        self._time_cache.clear()
 
 
 class VirtualMessageListView(QListView):

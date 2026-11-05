@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Быстрая детекция логов."""
+"""Быстрая детекция логов.
+
+Оптимизации (рефакторинг 2026):
+- Один stat() на файл (было два).
+- Подсчёт повторов с ранним выходом (findall со списком -> finditer со счётчиком).
+"""
 
 from __future__ import annotations
 
@@ -19,15 +24,27 @@ BINARY_EXTS = {
     ".mov", ".mkv", ".iso", ".dmg"
 }
 
+_MAX_DETECTOR_SIZE = 100 * 1024 * 1024  # >100MB — ограничиваем чтение шапки
+
+
+def _count_matches(pattern: re.Pattern, text: str, minimum: int) -> bool:
+    """True, если pattern встречается >= minimum раз (ранний выход, без списка)."""
+    n = 0
+    for _ in pattern.finditer(text):
+        n += 1
+        if n >= minimum:
+            return True
+    return False
+
 
 def _looks_like_text_log_head(head: str) -> bool:
     if _RE_ARENA.search(head):
         return True
-    if len(_RE_ARENA_BARE.findall(head)) >= 2:
+    if _count_matches(_RE_ARENA_BARE, head, 2):
         return True
     if _RE_EXPORT_HEADER.search(head):
         return True
-    return len(_RE_NUMBERED.findall(head)) >= 2
+    return _count_matches(_RE_NUMBERED, head, 2)
 
 
 def looks_like_log(path) -> bool:
@@ -39,19 +56,16 @@ def looks_like_log(path) -> bool:
     if suffix in BINARY_EXTS:
         return False
 
-    # tiny files (<10 bytes) skip
     try:
-        if p.stat().st_size < 10:
+        size = p.stat().st_size  # один stat вместо двух
+        if size < 10:
             return False
-        if p.stat().st_size > 100 * 1024 * 1024:  # >100MB skip as log candidate (checked elsewhere)
-            # still check header, but limit
-            pass
     except OSError:
         return False
 
     try:
         with p.open("rb") as fh:
-            head_bytes = fh.read(8192)  # 8KB достаточно для детекции, раньше было 4KB
+            head_bytes = fh.read(8192)  # 8KB достаточно для детекции
             if not head_bytes:
                 return False
             # quick binary check — если много нулевых байтов, это бинарник

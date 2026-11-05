@@ -1,9 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Оптимизированный поисковый индекс — батчи, ThreadPool, улучшенные PRAGMA."""
+"""Оптимизированный поисковый индекс — батчи, ThreadPool, улучшенные PRAGMA.
+
+Оптимизации (рефакторинг 2026):
+- Один SELECT на всю таблицу files (path -> id/mtime/size/kind) вместо запроса
+  на каждый файл в цикле записи.
+- kind классифицируется один раз в collect_targets и пробрасывается до записи —
+  _get_kind больше не перечитывает шапки файлов (двойной I/O устранён).
+"""
 
 from __future__ import annotations
 
-import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,7 +19,7 @@ from typing import Optional
 
 from ..core.parsers.detector import looks_like_log
 from ..core.parsers.parser import parse_file
-from ..utils.encoding import read_text_file, detect_encoding_and_decode
+from ..utils.encoding import read_text_file
 from ..utils.paths import get_index_db_path
 from .text_splitter import split_text_blocks
 from .query import sanitize_query
@@ -110,9 +116,19 @@ class SearchIndex:
             with self.con:
                 self.con.execute("ALTER TABLE files ADD COLUMN kind TEXT NOT NULL DEFAULT 'log'")
 
+    # ---- известные файлы: один запрос вместо per-file SELECT ----
+    def _load_known(self) -> dict[str, tuple]:
+        """path -> (id, mtime, size, kind) для всех файлов в индексе."""
+        return {
+            row[0]: (row[1], row[2], row[3], row[4])
+            for row in self.con.execute("SELECT path, id, mtime, size, kind FROM files")
+        }
+
     # ---- сбор файлов ----
-    def collect_targets(self, paths, recursive: bool = True, include_logs: bool = True, include_txt: bool = True) -> list[tuple[str, str]]:
-        known = dict(self.con.execute("SELECT path, kind FROM files"))
+    def collect_targets(self, paths, recursive: bool = True, include_logs: bool = True, include_txt: bool = True,
+                        known: Optional[dict] = None) -> list[tuple[str, str]]:
+        if known is None:
+            known = self._load_known()
         out: list[tuple[str, str]] = []
         seen = set()
 
@@ -123,7 +139,8 @@ class SearchIndex:
 
         def classify(f: Path):
             sp = str(f)
-            k = known.get(sp)
+            rec = known.get(sp)
+            k = rec[3] if rec else None
             if k == KIND_TXT and include_txt:
                 return KIND_TXT
             if k == KIND_LOG and include_logs:
@@ -180,12 +197,12 @@ class SearchIndex:
         return (Path(path).stem, "", len(blocks)), rows
 
     def _prepare_one(self, item):
-        """Для пула: (path, kind) -> (meta, rows, file_stat) or error."""
+        """Для пула: (path, kind) -> (path, kind, meta, rows, file_stat, error)."""
         f, kind = item
         try:
             st = Path(f).stat()
         except OSError as ex:
-            return (f, None, None, None, f"{f}: {ex}")
+            return (f, kind, None, None, None, f"{f}: {ex}")
 
         try:
             if kind == KIND_TXT:
@@ -193,16 +210,17 @@ class SearchIndex:
             else:
                 meta, rows = self._prepare_log(f)
         except Exception as ex:
-            return (f, None, None, st, f"{f}: {ex}")
-        return (f, meta, rows, st, None)
+            return (f, kind, None, None, st, f"{f}: {ex}")
+        return (f, kind, meta, rows, st, None)
 
     def index_paths(self, paths, recursive: bool = True, include_logs: bool = True, include_txt: bool = True, progress=None, prune: bool = True, batch_size: int = 50, use_threads: bool = True) -> IndexStats:
         """Инкрементальная индексация с батчами и потоками."""
         t0 = time.time()
         stats = IndexStats()
-        targets = self.collect_targets(paths, recursive, include_logs, include_txt)
+        known = self._load_known()
+        targets = self.collect_targets(paths, recursive, include_logs, include_txt, known=known)
 
-        # Быстрый skip по mtime/size без парсинга
+        # Быстрый skip по mtime/size без парсинга (из кэша known, без запросов в БД)
         to_parse: list[tuple[str, str]] = []
         for f, kind in targets:
             try:
@@ -210,8 +228,8 @@ class SearchIndex:
             except OSError as ex:
                 stats.errors.append(f"{f}: {ex}")
                 continue
-            row = self.con.execute("SELECT id, mtime, size FROM files WHERE path=?", (f,)).fetchone()
-            if row and abs(row[1] - st.st_mtime) < 1e-6 and row[2] == st.st_size:
+            rec = known.get(f)
+            if rec and abs(rec[1] - st.st_mtime) < 1e-6 and rec[2] == st.st_size:
                 stats.skipped += 1
                 continue
             to_parse.append((f, kind))
@@ -226,7 +244,8 @@ class SearchIndex:
                 futures = {ex.submit(self._prepare_one, item): item for item in to_parse}
                 for fut in as_completed(futures):
                     res = fut.result()
-                    path, meta, rows, st, err = res
+                    path = res[0]
+                    err = res[5]
                     if err:
                         stats.errors.append(err)
                     else:
@@ -237,7 +256,8 @@ class SearchIndex:
         else:
             for item in to_parse:
                 res = self._prepare_one(item)
-                path, meta, rows, st, err = res
+                path = res[0]
+                err = res[5]
                 if err:
                     stats.errors.append(err)
                 else:
@@ -251,21 +271,21 @@ class SearchIndex:
         for i in range(0, len(prepared), batch_size):
             batch = prepared[i : i + batch_size]
             with self.con:  # транзакция
-                for f, meta, rows, st, err in batch:
+                for f, kind, meta, rows, st, err in batch:
                     title, model, msg_count = meta
-                    row = self.con.execute("SELECT id FROM files WHERE path=?", (f,)).fetchone()
-                    if row:
-                        file_id = row[0]
+                    rec = known.get(f)
+                    if rec:
+                        file_id = rec[0]
                         self.con.execute("DELETE FROM messages WHERE file_id=?", (file_id,))
                         self.con.execute(
                             "UPDATE files SET kind=?, mtime=?, size=?, title=?, model=?, msg_count=?, indexed_at=? WHERE id=?",
-                            (self._get_kind(f), st.st_mtime, st.st_size, title, model, msg_count, time.time(), file_id),
+                            (kind, st.st_mtime, st.st_size, title, model, msg_count, time.time(), file_id),
                         )
                         stats.updated += 1
                     else:
                         cur = self.con.execute(
                             "INSERT INTO files (path, kind, mtime, size, title, model, msg_count, indexed_at) VALUES (?,?,?,?,?,?,?,?)",
-                            (f, self._get_kind(f), st.st_mtime, st.st_size, title, model, msg_count, time.time()),
+                            (f, kind, st.st_mtime, st.st_size, title, model, msg_count, time.time()),
                         )
                         file_id = cur.lastrowid
                         stats.added += 1
@@ -286,7 +306,7 @@ class SearchIndex:
         return stats
 
     def _get_kind(self, path):
-        # determine kind by content again? For simplicity, return log if looks_like_log else txt
+        # Оставлен для обратной совместимости; index_paths использует kind из collect_targets
         p = Path(path)
         if p.suffix.lower() in TEXT_SUFFIXES and not looks_like_log(p):
             return KIND_TXT

@@ -6,6 +6,12 @@
   2. Морфологический стемминг Портера (RU/EN)
   3. Символьные 3-4 граммы (Character N-gram TF-IDF cosine similarity)
   4. Кэширование с @lru_cache без риска коллизий
+
+Оптимизации (рефакторинг 2026):
+- dict-форма вектора кэшируется отдельно — косинус не перестраивает dict на каждый вызов.
+- Дедупликация spans через set (было O(n²) на списке).
+- str.find вместо regex для подсчёта точных вхождений.
+- Предкомпилированные whitespace-regex для сниппетов.
 """
 
 from __future__ import annotations
@@ -19,6 +25,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..core.models import ChatLog, Message
 from .stemmer import match_stemmed_query, stem_word
+
+_RE_WS = re.compile(r"\s+")
+_RE_WORDS = re.compile(r"[A-Za-zА-Яа-яЁё0-9_]+")
 
 
 @dataclass
@@ -40,12 +49,12 @@ class HybridHit:
 @lru_cache(maxsize=4096)
 def get_subword_vector(text: str) -> Tuple[Tuple[str, float], ...]:
     """Строит нормализованный TF-вектор n-грамм с LRU-кэшированием по тексту."""
-    cleaned = re.sub(r"\s+", " ", text.lower()).strip()
+    cleaned = _RE_WS.sub(" ", text.lower()).strip()
     if not cleaned:
         return ()
 
     grams: Counter[str] = Counter()
-    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9_]+", cleaned)
+    words = _RE_WORDS.findall(cleaned)
 
     for word in words:
         w_len = len(word)
@@ -63,11 +72,17 @@ def get_subword_vector(text: str) -> Tuple[Tuple[str, float], ...]:
     return tuple((k, v / norm) for k, v in grams.items())
 
 
+@lru_cache(maxsize=4096)
+def _vector_as_dict(vec: Tuple[Tuple[str, float], ...]) -> Dict[str, float]:
+    """Кэшированная dict-форма вектора: косинус не перестраивает dict на каждый вызов."""
+    return dict(vec)
+
+
 def cosine_similarity_tuple(vec_a: Tuple[Tuple[str, float], ...], vec_b: Tuple[Tuple[str, float], ...]) -> float:
     """Вычисляет косинусное сходство двух векторов."""
     if not vec_a or not vec_b:
         return 0.0
-    dict_b = dict(vec_b)
+    dict_b = _vector_as_dict(vec_b)
     return sum(val * dict_b.get(key, 0.0) for key, val in vec_a)
 
 
@@ -76,14 +91,14 @@ def build_snippet(text: str, spans: List[Tuple[int, int]], limit: int = 240) -> 
     if not text:
         return ""
     if not spans:
-        cleaned = re.sub(r"\s+", " ", text).strip()
+        cleaned = _RE_WS.sub(" ", text).strip()
         return cleaned[:limit] + ("…" if len(cleaned) > limit else "")
 
     first_start, first_end = spans[0]
     a = max(0, first_start - 70)
     b = min(len(text), first_end + 150)
     raw_slice = text[a:b]
-    cleaned_slice = re.sub(r"\s+", " ", raw_slice).strip()
+    cleaned_slice = _RE_WS.sub(" ", raw_slice).strip()
 
     prefix = "…" if a > 0 else ""
     suffix = "…" if b < len(text) else ""
@@ -121,35 +136,42 @@ class HybridSearchEngine:
                     candidates.append((msg.text, "user", False))
                 if scope in ("all", "model") and not msg.is_user and msg.text:
                     candidates.append((msg.text, "model", False))
-                if scope in ("all", "thoughts") and msg.has_thoughts:
-                    for t in msg.thoughts:
-                        candidates.append((t, "model", True))
-                elif scope == "thoughts" and msg.has_thoughts:
+                if msg.has_thoughts and scope in ("all", "thoughts"):
                     for t in msg.thoughts:
                         candidates.append((t, "model", True))
 
                 for text, role, is_thought in candidates:
                     text_lower = text.lower()
 
-                    # 1. Точный лексический скор
+                    # 1. Точный лексический скор (str.find — быстрее regex на больших текстах)
                     fts_score = 0.0
                     spans: List[Tuple[int, int]] = []
                     if q_lower in text_lower:
-                        count = text_lower.count(q_lower)
+                        count = 0
+                        start = 0
+                        q_len = len(q_lower)
+                        while True:
+                            pos = text_lower.find(q_lower, start)
+                            if pos < 0:
+                                break
+                            spans.append((pos, pos + q_len))
+                            count += 1
+                            start = pos + q_len
                         fts_score = min(1.0, 0.5 + count * 0.15)
-                        for m in re.finditer(re.escape(q_lower), text_lower):
-                            spans.append((m.start(), m.end()))
 
                     # 2. Морфологический стемминг
                     stem_matched, stem_raw_score, stem_spans = match_stemmed_query(q_clean, text)
                     stem_score = 0.0
                     if stem_matched:
                         stem_score = min(1.0, stem_raw_score / 10.0)
-                        for s in stem_spans:
-                            if s not in spans:
-                                spans.append(s)
+                        if stem_spans:
+                            seen = set(spans)
+                            for s in stem_spans:
+                                if s not in seen:
+                                    spans.append(s)
+                                    seen.add(s)
 
-                    # 3. Символьные n-граммы
+                    # 3. Символьные n-граммы (dict-вектор кэшируется)
                     doc_vec = get_subword_vector(text)
                     sem_score = cosine_similarity_tuple(q_vec, doc_vec)
 

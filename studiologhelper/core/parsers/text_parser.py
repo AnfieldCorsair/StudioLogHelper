@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
-"""Текстовый парсер Arena AI / очищенных экспортов."""
+"""Текстовый парсер Arena AI / очищенных экспортов.
+
+Оптимизации (рефакторинг 2026):
+- Наборы заголовков (user/model) собираются ОДИН раз на файл, а не на каждую строку.
+- Bare-детекция заголовков выполняется только для коротких строк (заголовки
+  не могут быть длинными) — раньше _norm_header с regex шёл по всему тексту строки.
+- _RE_PLAIN_HEADER / export-заголовки проверяются только при наличии ':' /
+  стартовых символов — быстрые C-проверки вместо regex на каждой строке.
+"""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, Set
 
 from ..exceptions import ParseError
 from ..models import ChatLog, Message
@@ -29,6 +37,9 @@ DEFAULT_MODEL_HEADERS = (
     "answer", "response", "модель", "ассистент", "ответ",
 )
 
+# Заголовки в safe_bare гарантированно короткие — guard по длине строки
+_BARE_MAX_LEN = 80
+
 
 def _norm_header(s: str) -> str:
     s = s.strip().strip(":").strip()
@@ -45,17 +56,37 @@ def _merged_headers(extra: list, defaults: tuple) -> set[str]:
     return vals
 
 
+class _RoleResolver:
+    """Предвычисленные наборы заголовков — резолвинг ролей без пересборки сетов."""
+
+    __slots__ = ("user_headers", "model_headers")
+
+    def __init__(self, opts: TextParseOptions):
+        self.user_headers = _merged_headers(opts.user_headers, DEFAULT_USER_HEADERS)
+        self.model_headers = _merged_headers(opts.model_headers, DEFAULT_MODEL_HEADERS)
+
+    def resolve(self, header: str) -> Optional[str]:
+        h = _norm_header(header)
+        if h in self.user_headers:
+            return "user"
+        if h in self.model_headers:
+            return "model"
+        if h.startswith("right ") or h.startswith("model "):
+            return "model"
+        return None
+
+    def resolve_norm(self, norm: str) -> Optional[str]:
+        """Резолвинг по уже нормализованному заголовку (для bare-строк)."""
+        if norm in self.user_headers:
+            return "user"
+        if norm in self.model_headers:
+            return "model"
+        return None
+
+
 def _role_from_header(header: str, opts: TextParseOptions) -> Optional[str]:
-    h = _norm_header(header)
-    uh = _merged_headers(opts.user_headers, DEFAULT_USER_HEADERS)
-    mh = _merged_headers(opts.model_headers, DEFAULT_MODEL_HEADERS)
-    if h in uh:
-        return "user"
-    if h in mh:
-        return "model"
-    if h.startswith("right ") or h.startswith("model "):
-        return "model"
-    return None
+    """Совместимая обёртка (создаёт резолвер — используйте _RoleResolver в циклах)."""
+    return _RoleResolver(opts).resolve(header)
 
 
 def _role_for_number(num: int, opts: TextParseOptions) -> str:
@@ -97,12 +128,16 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
     if _RE_ARENA_SIDE.search(text):
         chat.model = "Arena AI"
 
+    resolver = _RoleResolver(opts)
     role: Optional[str] = None
     buf: list[str] = []
     saw_numbered = False
 
-    # safe bare set for lines without colon
-    safe_bare = {
+    # safe bare set for lines without colon (один раз на файл).
+    # ВНИМАНИЕ: только ДОПОЛНИТЕЛЬНЫЕ заголовки из опций (не DEFAULT_*):
+    # слова вроде "answer"/"response" валидны как "Answer: ..." (plain-заголовок),
+    # но не как bare-строка (иначе тело текста ошибочно станет заголовком).
+    safe_bare: Set[str] = {
         "user", "пользователь", "human",
         "right ai", "right model", "model", "modelname",
         "assistant", "ai", "модель", "ассистент",
@@ -112,13 +147,17 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
         if _RE_ARENA_SIDE.match(line):
             continue
 
-        bare_norm = _norm_header(line)
-        bare_role = _role_from_header(line, opts)
-        if bare_role and bare_norm in safe_bare:
-            _flush(chat, role, buf)
-            buf = []
-            role = bare_role
-            continue
+        # Bare-заголовок: нормализация только для коротких строк
+        stripped_line = line.strip()
+        if len(stripped_line) <= _BARE_MAX_LEN:
+            bare_norm = _norm_header(stripped_line)
+            if bare_norm in safe_bare:
+                bare_role = resolver.resolve_norm(bare_norm)
+                if bare_role:
+                    _flush(chat, role, buf)
+                    buf = []
+                    role = bare_role
+                    continue
 
         m = _RE_NUMBERED.match(line)
         if m:
@@ -132,30 +171,34 @@ def parse_text_log(text: str, path: str = "", options: Optional[TextParseOptions
                 buf.append(rest)
             continue
 
-        exported = _parse_export_header(line)
-        if exported:
-            n, label = exported
-            label = _RE_TIME_BRACKETS.sub("", label).strip(" -—\t")
-            detected = _role_from_header(label, opts) or _role_for_number(n, opts)
-            _flush(chat, role, buf)
-            buf = []
-            saw_numbered = True
-            role = detected
-            continue
-
-        m = _RE_PLAIN_HEADER.match(line)
-        if m:
-            if role is None and line[:1].isspace():
-                continue
-            detected = _role_from_header(m.group("header"), opts)
-            if detected:
+        # Export-заголовки: быстрый guard по стартовым символам
+        if stripped_line[:1] in ("-", "#"):
+            exported = _parse_export_header(line)
+            if exported:
+                n, label = exported
+                label = _RE_TIME_BRACKETS.sub("", label).strip(" -—\t")
+                detected = resolver.resolve(label) or _role_for_number(n, opts)
                 _flush(chat, role, buf)
                 buf = []
+                saw_numbered = True
                 role = detected
-                rest = m.group("rest")
-                if rest:
-                    buf.append(rest)
                 continue
+
+        # Plain-заголовок "Role: text" — только если в строке есть ':'
+        if ":" in line:
+            m = _RE_PLAIN_HEADER.match(line)
+            if m:
+                if role is None and line[:1].isspace():
+                    continue
+                detected = resolver.resolve(m.group("header"))
+                if detected:
+                    _flush(chat, role, buf)
+                    buf = []
+                    role = detected
+                    rest = m.group("rest")
+                    if rest:
+                        buf.append(rest)
+                    continue
 
         if role is not None:
             buf.append(line)

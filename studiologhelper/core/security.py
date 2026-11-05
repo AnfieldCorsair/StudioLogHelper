@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""security.py — Санитизация HTML, валидация URL и безопасность плагинов."""
+"""security.py — Санитизация HTML, валидация URL и безопасность плагинов.
+
+Оптимизации (рефакторинг 2026): все regex предкомпилированы, sanitize_html
+имеет быстрый выход для строк без '<'.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +28,13 @@ DANGEROUS_ATTRIBUTES_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Предкомпилированные паттерны для горячих путей
+_RE_STRIP_CTL = re.compile(r"[\s\x00-\x1f\x7f]+")
+_RE_SCHEME = re.compile(r"^([a-zA-Z0-9+-.]+):")
+_RE_A_TAG = re.compile(r"<a\s+[^>]*href=[\"'][^\"']*[\"'][^>]*>", re.IGNORECASE)
+_RE_HREF = re.compile(r'href\s*=\s*(["\'])(.*?)\1', re.IGNORECASE)
+_RE_HREF_HTTP = re.compile(r'href\s*=\s*["\']https?://', re.IGNORECASE)
+
 
 def _normalize_scheme_text(val: str) -> str:
     """Декодирует HTML entities и URL-encoding для выявления скрытых протоколов."""
@@ -37,7 +48,7 @@ def _normalize_scheme_text(val: str) -> str:
     except Exception:
         pass
     # Удаляем управляющие и невидимые символы
-    return re.sub(r"[\s\x00-\x1f\x7f]+", "", decoded).lower()
+    return _RE_STRIP_CTL.sub("", decoded).lower()
 
 
 def is_safe_url(url: str) -> bool:
@@ -50,7 +61,7 @@ def is_safe_url(url: str) -> bool:
     if any(normalized.startswith(proto) for proto in ("javascript:", "vbscript:", "data:text/html", "data:text/javascript", "file:")):
         return False
 
-    match = re.match(r"^([a-zA-Z0-9+-.]+):", normalized)
+    match = _RE_SCHEME.match(normalized)
     if match:
         scheme = match.group(1)
         return scheme in ALLOWED_URL_SCHEMES
@@ -77,6 +88,9 @@ def sanitize_html(html_str: str) -> str:
     """
     if not html_str:
         return ""
+    if "<" not in html_str:
+        # Без тегов санитизировать нечего — быстрый выход
+        return html_str
 
     cleaned = DANGEROUS_TAGS_PATTERN.sub("", html_str)
     cleaned = SELF_CLOSING_DANGEROUS_TAGS.sub("", cleaned)
@@ -85,15 +99,15 @@ def sanitize_html(html_str: str) -> str:
     # Проверка и санитизация ссылок <a href="..."> с декодированием entities
     def clean_link_tag(m: re.Match) -> str:
         tag = m.group(0)
-        href_match = re.search(r'href\s*=\s*(["\'])(.*?)\1', tag, re.IGNORECASE)
+        href_match = _RE_HREF.search(tag)
         if href_match:
             raw_url = href_match.group(2)
             if not is_safe_url(raw_url):
                 tag = tag[:href_match.start(2)] + "#" + tag[href_match.end(2):]
-        if "rel=" not in tag.lower() and re.search(r'href\s*=\s*["\']https?://', tag, re.IGNORECASE):
+        if "rel=" not in tag.lower() and _RE_HREF_HTTP.search(tag):
             tag = tag[:-1] + ' rel="noopener noreferrer">'
         return tag
 
-    cleaned = re.sub(r'<a\s+[^>]*href=["\'][^"\']*["\'][^>]*>', clean_link_tag, cleaned, flags=re.IGNORECASE)
+    cleaned = _RE_A_TAG.sub(clean_link_tag, cleaned)
 
     return cleaned
