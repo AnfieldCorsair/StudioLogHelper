@@ -1,0 +1,16 @@
+{
+  "_comment": "Золотые значения (ms) на скромном железе, Python 3.13, после оптимизаций 2026-11. Бюджет гейта = max(golden * multiplier, floor_ms).",
+  "multiplier": 10,
+  "floor_ms": 25,
+  "cases": {
+    "stem_word x9000": 0.7,
+    "tokenize+stem (1 msg x5)": 0.4,
+    "match_stemmed_query (100 msgs)": 13.2,
+    "fast_search_chats (30 chats)": 127.0,
+    "regex_search_chats (30 chats)": 28.5,
+    "hybrid_search (30 chats)": 252.0,
+    "parse_text_log (2500 blocks)": 32.0,
+    "detector head x200": 0.1,
+    "markdown_to_html_builtin (80 sect)": 3.3
+  }
+}

@@ -13,6 +13,12 @@ DEFAULT_LANG = "ru"
 # Встроенные строки — fallback если нет JSON файлов
 _RU = {
     "cancel": "Отмена",
+    "ui_mode_label": "Режим:",
+    "ui_mode_simple": "Простой",
+    "ui_mode_advanced": "Расширенный",
+    "ui_mode_tooltip": "Простой режим — только чтение и поиск. Расширенный — все инструменты (категории, теги, вкладки, настройки).",
+    "ui_mode_switched_simple": "Включён простой режим интерфейса",
+    "ui_mode_switched_advanced": "Включён расширенный режим интерфейса",
     "user": "ПОЛЬЗОВАТЕЛЬ",
     "model": "МОДЕЛЬ",
     "status_hint": "Откройте файлы или папку с логами AI Studio — или перетащите их в окно.",
@@ -280,6 +286,12 @@ _RU = {
 
 _EN = {
     "cancel": "Cancel",
+    "ui_mode_label": "Mode:",
+    "ui_mode_simple": "Simple",
+    "ui_mode_advanced": "Advanced",
+    "ui_mode_tooltip": "Simple mode — reading and search only. Advanced — all tools (categories, tags, tabs, settings).",
+    "ui_mode_switched_simple": "Simple UI mode enabled",
+    "ui_mode_switched_advanced": "Advanced UI mode enabled",
     "user": "USER",
     "model": "MODEL",
     "status_hint": "Open AI Studio log files or a folder — or drop them into this window.",

@@ -7,7 +7,7 @@ import html as _html
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtCore import QPoint, QRect, QSettings, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
@@ -76,6 +76,22 @@ class ReaderBlock:
 ReaderBlockCard = ReaderBlock  # Alias for backward compatibility
 
 
+def _window_bounds(total: int, center_idx: int, size: int) -> Tuple[int, int]:
+    """Окно блоков [start, end) вокруг center_idx для виртуализации «Книги».
+
+    Чистая функция — тестируется без Qt. Окно никогда не выходит за границы,
+    при малом total покрывает все блоки.
+    """
+    if total <= 0:
+        return (0, 0)
+    size = max(1, min(size, total))
+    center_idx = max(0, min(center_idx, total - 1))
+    start = max(0, center_idx - size // 2)
+    end = min(total, start + size)
+    start = max(0, end - size)
+    return (start, end)
+
+
 class ReaderView(QWidget):
     """Высокопроизводительный книжный режим чтения с маркерами цитат."""
 
@@ -107,6 +123,22 @@ class ReaderView(QWidget):
         self._rebuild_timer.setSingleShot(True)
         self._rebuild_timer.setInterval(120)
         self._rebuild_timer.timeout.connect(self.rebuild_view)
+
+        # Виртуализация «Книги»: рендерится только окно блоков вокруг позиции
+        # чтения, остальное подгружается по скроллу/ссылкам «показать ещё».
+        try:
+            self.window_init = int(self.settings.value("reader/window_init", 40))
+        except (ValueError, TypeError):
+            self.window_init = 40
+        try:
+            self.window_grow = int(self.settings.value("reader/window_grow", 30))
+        except (ValueError, TypeError):
+            self.window_grow = 30
+        self._win_start = 0
+        self._win_end = 0
+        self._suspend_scroll = False
+        self._simple_mode = False
+        self._typo_widgets: List[QWidget] = []
 
         # Reader Settings
         self.reader_theme_name = self.settings.value("reader/theme", "reading_warm")
@@ -161,7 +193,8 @@ class ReaderView(QWidget):
         self.cmb_theme.currentIndexChanged.connect(self._on_theme_changed)
         tbl.addWidget(self.cmb_theme)
 
-        tbl.addWidget(QLabel("Шрифт:"))
+        self.lbl_font = QLabel("Шрифт:")
+        tbl.addWidget(self.lbl_font)
         self.cmb_font = QComboBox()
         self.cmb_font.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.cmb_font.addItem("Serif (Georgia / Noto)", "serif")
@@ -185,7 +218,8 @@ class ReaderView(QWidget):
         tbl.addWidget(self.lbl_fs)
         tbl.addWidget(b_fs_inc)
 
-        tbl.addWidget(QLabel("Интервал:"))
+        self.lbl_lh = QLabel("Интервал:")
+        tbl.addWidget(self.lbl_lh)
         self.cmb_lh = QComboBox()
         self.cmb_lh.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.cmb_lh.addItem("1.4x", 1.4)
@@ -196,7 +230,8 @@ class ReaderView(QWidget):
         self.cmb_lh.currentIndexChanged.connect(self._on_lh_changed)
         tbl.addWidget(self.cmb_lh)
 
-        tbl.addWidget(QLabel("Ширина:"))
+        self.lbl_width = QLabel("Ширина:")
+        tbl.addWidget(self.lbl_width)
         self.cmb_width = QComboBox()
         self.cmb_width.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.cmb_width.addItem("740px", "compact")
@@ -206,6 +241,9 @@ class ReaderView(QWidget):
         self.cmb_width.setCurrentIndex(wi if wi >= 0 else 1)
         self.cmb_width.currentIndexChanged.connect(self._on_width_changed)
         tbl.addWidget(self.cmb_width)
+
+        # Виджеты типографики — скрываются в простом режиме UI
+        self._typo_widgets = [self.lbl_font, self.cmb_font, self.lbl_lh, self.cmb_lh, self.lbl_width, self.cmb_width]
 
         tbl.addStretch(1)
 
@@ -306,6 +344,7 @@ class ReaderView(QWidget):
         self.browser = QTextBrowser()
         self.browser.setOpenLinks(False)
         self.browser.anchorClicked.connect(self._on_anchor_clicked)
+        self.browser.verticalScrollBar().valueChanged.connect(self._on_browser_scroll)
         self.browser.setReadOnly(True)
         self.browser.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.browser.customContextMenuRequested.connect(self._show_browser_context_menu)
@@ -350,6 +389,10 @@ class ReaderView(QWidget):
         url_str = url.toString()
         if url_str.startswith("#") or url.hasFragment():
             frag = url.fragment() or url_str.lstrip("#")
+            # Ссылки виртуализации: догрузка блоков выше/ниже окна
+            if frag in ("more_up", "more_down"):
+                self._grow_window(down=(frag == "more_down"))
+                return
             self.browser.scrollToAnchor(frag)
             m = re.search(r"block_(\d+)", frag)
             if m:
@@ -368,7 +411,11 @@ class ReaderView(QWidget):
         self.lbl_search_count.setText("")
         self._load_blocks_from_chat()
         self._dirty = True
-        self.rebuild_view()
+        # Новый чат — окно виртуализации от начала
+        self._win_start, self._win_end = _window_bounds(len(self.blocks), 0, self.window_init)
+        if self.blocks:
+            self._current_block_num = self.blocks[0].num
+        self.rebuild_view(scroll_mode="top")
 
     def open_external_file(self):
         last_dir = self.settings.value("ui/last_dir", str(Path.home()))
@@ -562,15 +609,34 @@ class ReaderView(QWidget):
         """Debounce перерисовки: серия кликов A+/A−/тема собирается в одну."""
         self._rebuild_timer.start()
 
-    def rebuild_view(self):
+    def rebuild_view(self, scroll_mode: str = "ratio"):
+        """Пересобрать видимое окно «Книги».
+
+        scroll_mode: "ratio" — сохранить относительную позицию (смена настроек),
+        "keep" — сохранить абсолютный сдвиг (догрузка вниз),
+        "grow_up" — компенсировать добавленный сверху контент, "top" — с начала.
+        """
         self._rebuild_timer.stop()  # отменяем отложенную перерисовку, если она была
         if not self.blocks:
-            self.browser.setHtml(
-                f"<div style='text-align:center; padding: 40px; color: #888888;'><h3>{self._tr('list_empty')}</h3></div>"
-            )
+            self._suspend_scroll = True
+            try:
+                self.browser.setHtml(
+                    f"<div style='text-align:center; padding: 40px; color: #888888;'><h3>{self._tr('list_empty')}</h3></div>"
+                )
+            finally:
+                self._suspend_scroll = False
             self.lbl_progress.setText(self._tr("reader_block_info", cur=0, total=0))
             self._refresh_toc()
             return
+
+        # Валидация окна виртуализации
+        total = len(self.blocks)
+        self._win_start = max(0, min(self._win_start, total))
+        self._win_end = max(self._win_start, min(self._win_end, total))
+        if self._win_end - self._win_start >= total:
+            self._win_start, self._win_end = 0, total
+        elif self._win_end == self._win_start:
+            self._win_start, self._win_end = _window_bounds(total, 0, self.window_init)
 
         theme = THEMES.get(self.reader_theme_name, THEMES["reading_warm"])
         font_family = self._get_font_family_css()
@@ -693,7 +759,14 @@ class ReaderView(QWidget):
 
         html_blocks = [f"<!DOCTYPE html><html><head>{css}</head><body><div class='book-container'>"]
 
-        for b in self.blocks:
+        # Виртуализация: ссылки догрузки + рендер только окна блоков
+        if self._win_start > 0:
+            html_blocks.append(
+                "<div style='text-align:center; margin: 12px;'>"
+                f"<a href='#more_up'>↑ Показать предыдущие {self._win_start} блок(ов)</a></div>"
+            )
+
+        for b in self.blocks[self._win_start : self._win_end]:
             is_user = b.is_user
             card_cls = "card card-user" if is_user else "card"
             role_cls = "role-user" if is_user else ("role-model" if b.role == "model" else "role-sys")
@@ -753,10 +826,32 @@ class ReaderView(QWidget):
             """
             html_blocks.append(block_html)
 
+        if self._win_end < total:
+            html_blocks.append(
+                "<div style='text-align:center; margin: 12px;'>"
+                f"<a href='#more_down'>↓ Показать следующие {total - self._win_end} блок(ов)</a></div>"
+            )
+
         html_blocks.append("</div></body></html>")
         full_html = "".join(html_blocks)
 
-        self.browser.setHtml(full_html)
+        # Сохранение позиции чтения при пересборке окна
+        sb = self.browser.verticalScrollBar()
+        old_val, old_max = sb.value(), sb.maximum()
+        self._suspend_scroll = True
+        try:
+            self.browser.setHtml(full_html)
+            new_max = sb.maximum()
+            if scroll_mode == "keep":
+                sb.setValue(min(old_val, new_max))
+            elif scroll_mode == "grow_up":
+                sb.setValue(min(old_val + max(0, new_max - old_max), new_max))
+            elif scroll_mode == "ratio" and old_max > 0 and new_max > 0:
+                sb.setValue(int(new_max * old_val / old_max))
+            # "top" — оставляем начало документа
+        finally:
+            self._suspend_scroll = False
+
         self.lbl_progress.setText(
             self._tr("reader_block_info", cur=self._current_block_num, total=len(self.blocks))
         )
@@ -804,10 +899,56 @@ class ReaderView(QWidget):
 
     def jump_to_block(self, block_num: int):
         self._current_block_num = block_num
+        # Если блок вне окна виртуализации — расширяем окно вокруг него
+        idx = self._block_index(block_num)
+        if idx >= 0 and not (self._win_start <= idx < self._win_end):
+            self._win_start, self._win_end = _window_bounds(len(self.blocks), idx, self.window_init)
+            self.rebuild_view(scroll_mode="top")
         self.browser.scrollToAnchor(f"block_{block_num}")
         self.lbl_progress.setText(
             self._tr("reader_block_info", cur=block_num, total=len(self.blocks))
         )
+
+    def _block_index(self, block_num: int) -> int:
+        """Индекс блока в self.blocks по его num (или -1)."""
+        for i, b in enumerate(self.blocks):
+            if b.num == block_num:
+                return i
+        return -1
+
+    def _on_browser_scroll(self, value: int):
+        """Автодогрузка блоков при приближении к краю видимого окна."""
+        if self._suspend_scroll or not self.blocks:
+            return
+        sb = self.browser.verticalScrollBar()
+        if sb.maximum() <= 0:
+            return  # весь документ помещается — догружать некуда/не нужно
+        if value >= sb.maximum() - 220 and self._win_end < len(self.blocks):
+            self._grow_window(down=True)
+        elif value <= 220 and self._win_start > 0:
+            self._grow_window(down=False)
+
+    def _grow_window(self, down: bool):
+        """Расширить окно виртуализации на window_grow блоков вниз/вверх."""
+        if self._suspend_scroll:
+            return
+        if down and self._win_end >= len(self.blocks):
+            return
+        if not down and self._win_start <= 0:
+            return
+        n = self.window_grow
+        if down:
+            self._win_end = min(len(self.blocks), self._win_end + n)
+            self.rebuild_view(scroll_mode="keep")
+        else:
+            self._win_start = max(0, self._win_start - n)
+            self.rebuild_view(scroll_mode="grow_up")
+
+    def set_simple_mode(self, on: bool):
+        """Простой режим UI: скрыть настройки типографики (шрифт/интервал/ширина)."""
+        self._simple_mode = on
+        for w in self._typo_widgets:
+            w.setVisible(not on)
 
     def prev_block(self):
         if not self.blocks:

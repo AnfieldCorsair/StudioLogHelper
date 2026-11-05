@@ -1,13 +1,21 @@
 # StudioLogHelper - Pre-Release 1.1 (PyQt6)
 
+[![CI](https://github.com/AnfieldCorsair/StudioLogHelper/actions/workflows/ci.yml/badge.svg)](https://github.com/AnfieldCorsair/StudioLogHelper/actions/workflows/ci.yml)
+
 Desktop application and CLI utility for parsing, reading, searching, and exporting AI chat logs from **Google AI Studio** (including extensionless JSON files downloaded from Google Drive), **Arena AI plain-text exports**, and cleaned TXT/MD logs.
 
 ---
 
 ## Key Features
 
+### 🎛 UI Modes: Simple / Advanced
+- **Simple mode (default):** reading and search only — the Book and the Search tab, open/export buttons, theme and language. Nothing extra.
+- **Advanced mode:** the full toolkit — Cards, Virtual and Source tabs, categories, tags, notes, projects, plugins, fine-grained view settings.
+- The **"Mode:"** switcher sits in the top-right corner; the choice persists between sessions (`ui/mode`).
+
 ### 📖 Book Reading Mode & Typography
 - **Comfortable Reading:** Formats conversations into a structured book with clean chapter headers and customizable column widths (`740px`, `920px`, `100%`).
+- **Virtualized long chats:** only a window of blocks around the reading position is rendered; the rest loads on scroll and via "show more" links — 1000+ messages without freezes and with minimal memory footprint.
 - **Reading Palettes:**
   - 📜 **Warm Paper (Solarized Warm):** background `#fdf6e3`, soft text `#43525a`, accent `#b58900`.
   - 🕰 **Vintage Sepia:** background `#f4ecd8`, warm text `#3c2f1f`.
@@ -38,6 +46,11 @@ Desktop application and CLI utility for parsing, reading, searching, and exporti
 - **HTML Sanitization:** Built-in XSS protection, entity decoding, and stripping of dangerous tags and `javascript:` protocols.
 - **Safe External Links:** Automatic injection of `rel="noopener noreferrer"`.
 - **Plugin Safe Mode:** Safe mode flag `--safe-mode` / `--disable-plugins` in GUI and CLI to prevent loading arbitrary third-party code.
+
+### ⚙️ Engineering: CI & Benchmarks
+- **GitHub Actions CI:** tests on Linux (Python 3.10–3.13), Windows and macOS, headless Qt (`QT_QPA_PLATFORM=offscreen`), ruff lint.
+- **Benchmark gates:** `bench/bench.py` measures hot paths (stemming, search, parsing); `bench/check_gates.py` fails the build on performance regressions (golden values in `bench/golden.json`).
+- **2026-11 optimizations:** search is 4–7× faster, text log parsing ~6× — details in [Agent/AUDIT.md](Agent/AUDIT.md).
 
 ---
 

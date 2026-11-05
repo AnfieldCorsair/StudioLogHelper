@@ -24,3 +24,7 @@ data/exports/*
 
 logs/*
 !logs/.gitkeep
+
+# Generated benchmark artifacts
+bench/results.json
+bench-results.txt

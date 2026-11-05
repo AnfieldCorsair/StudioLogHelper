@@ -96,3 +96,22 @@ pytest --cov=studiologhelper
 - **reader_view**: кэш body-HTML блоков (не зависит от темы/шрифта), debounce 120ms,
   O(n+m) карты закладок/цитат; **virtual_view**: кэш `time_str()`.
 - Бенчмарк: `bench/bench.py`; новые тесты: `tests/test_refactor_regressions.py` (65 passed).
+
+## Раунд 2026-11 (ч.2): CI, виртуализация «Книги», режимы UI
+
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): pytest-матрица Linux
+  (Python 3.10–3.13) + Windows + macOS, headless Qt (`QT_QPA_PLATFORM=offscreen`,
+  `tests/conftest.py` с session QApplication), lint ruff.
+- **Бенчмарк-гейты**: `bench/bench.py`, `bench/check_gates.py`, `bench/golden.json` —
+  сборка падает при регрессии производительности; результаты — артефактом.
+- **Виртуализация «Книги»**: оконный рендер блоков вокруг позиции чтения
+  (`_window_bounds`), догрузка по скроллу и ссылкам «↑/↓ показать ещё»,
+  переходы `jump_to_block` переносят окно; настройки `reader/window_init` (40),
+  `reader/window_grow` (30). 1000+ сообщений — без фризов.
+- **Режимы интерфейса**: «Простой» (по умолчанию — только Книга + Поиск) и
+  «Расширенный» (все инструменты). Переключатель «Режим:» в правом верхнем углу,
+  состояние в `ui/mode`. В простом режиме Reader также скрывает типографику.
+- **Тесты**: 77 passed (добавлены `test_reader_virtualization.py`,
+  `test_ui_modes.py`); ruff нашёл и мы починили реальный баг: `_html`
+  не импортирован в `main_window._show_plugins` (краш при открытии Plugins).
+- **pyproject**: `requires-python = ">=3.10"` (код использует `dataclass(slots=True)`).

@@ -2,6 +2,7 @@
 """Бенчмарк горячих путей StudioLogHelper: стеммер, поиск, парсеры, markdown.
 
 Запуск: python bench/bench.py [метка]
+Гейты для CI: python bench/check_gates.py (см. golden.json)
 """
 import sys
 import time
@@ -112,14 +113,21 @@ def b_markdown():
     return len(markdown_to_html_builtin(MD_TEXT))
 
 
+# Реестр кейсов — используется bench.py и check_gates.py
+BENCH_CASES = [
+    ("stem_word x9000", b_stemmer),
+    ("tokenize+stem (1 msg x5)", b_tokenize_stem),
+    ("match_stemmed_query (100 msgs)", b_match_stemmed),
+    ("fast_search_chats (30 chats)", b_memory_search),
+    ("regex_search_chats (30 chats)", b_regex_search),
+    ("hybrid_search (30 chats)", b_hybrid_search),
+    ("parse_text_log (2500 blocks)", b_text_parser),
+    ("detector head x200", b_detector_head),
+    ("markdown_to_html_builtin (80 sect)", b_markdown),
+]
+
+
 if __name__ == "__main__":
     print(f"corpus: {len(CORPUS)} chats, text log: {len(TEXT_LOG)//1024} KB")
-    bench("stem_word x9000", b_stemmer)
-    bench("tokenize+stem (1 msg x5)", b_tokenize_stem)
-    bench("match_stemmed_query (100 msgs)", b_match_stemmed)
-    bench("fast_search_chats (30 chats)", b_memory_search)
-    bench("regex_search_chats (30 chats)", b_regex_search)
-    bench("hybrid_search (30 chats)", b_hybrid_search)
-    bench("parse_text_log (2500 blocks)", b_text_parser)
-    bench("detector head x200", b_detector_head)
-    bench("markdown_to_html_builtin (80 sect)", b_markdown)
+    for name, fn in BENCH_CASES:
+        bench(name, fn)

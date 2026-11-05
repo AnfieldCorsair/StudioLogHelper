@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import html as _html
 import json
 import re
 from pathlib import Path
@@ -124,6 +125,10 @@ class MainWindow(QMainWindow):
         self.file_ctrl.show_diagnostics = self.settings.value("ui/show_diagnostics", "false") == "true"
         self.auto_collapse_long = self.settings.value("ui/auto_collapse_long", "true") == "true"
         self.use_virtual = self.settings.value("ui/use_virtual", "false") == "true"
+        # Режим интерфейса: "simple" (простой) | "advanced" (расширенный, все контролы)
+        self.ui_mode = str(self.settings.value("ui/mode", "simple")).strip().lower()
+        if self.ui_mode not in ("simple", "advanced"):
+            self.ui_mode = "simple"
 
         try:
             self.collapse_preview_chars = int(self.settings.value("ui/collapse_preview_chars", LONG_PREVIEW))
@@ -238,6 +243,7 @@ class MainWindow(QMainWindow):
         b_sep = QPushButton(self.tr("sep_button"))
         b_sep.clicked.connect(self.open_text_separators)
         self._decorate(b_sep, "search.png")
+        self.b_sep = b_sep
         top1.addWidget(b_sep)
 
         # Organize / Project Menu
@@ -264,6 +270,18 @@ class MainWindow(QMainWindow):
         top1.addWidget(self.btn_org)
 
         top1.addStretch(1)
+
+        # Переключатель режима интерфейса (доступен всегда)
+        lbl_mode = QLabel(self.tr("ui_mode_label"))
+        lbl_mode.setObjectName("muted")
+        top1.addWidget(lbl_mode)
+        self.cmb_ui_mode = QComboBox()
+        self.cmb_ui_mode.addItem(self.tr("ui_mode_simple"), "simple")
+        self.cmb_ui_mode.addItem(self.tr("ui_mode_advanced"), "advanced")
+        self.cmb_ui_mode.setCurrentIndex(0 if self.ui_mode == "simple" else 1)
+        self.cmb_ui_mode.currentIndexChanged.connect(self._change_ui_mode)
+        self.cmb_ui_mode.setToolTip(self.tr("ui_mode_tooltip"))
+        top1.addWidget(self.cmb_ui_mode)
         root.addLayout(top1)
 
         # Top Bar Row 2: View Controls
@@ -306,6 +324,7 @@ class MainWindow(QMainWindow):
         self.lbl_zoom = QLabel(f"{self.zoom}%")
         self.lbl_zoom.setMinimumWidth(36)
         self.lbl_zoom.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_widgets = [b_zout, self.lbl_zoom, b_zin]
         top2.addWidget(b_zout)
         top2.addWidget(self.lbl_zoom)
         top2.addWidget(b_zin)
@@ -358,6 +377,7 @@ class MainWindow(QMainWindow):
         filt.addRow(self.tr("filter_category"), self.cmb_filter_cat)
         filt.addRow(self.tr("filter_tag"), self.cmb_filter_tag)
         filt.addRow(self.tr("filter_text"), self.ed_filter)
+        self._filter_form = filt
         ll.addLayout(filt)
 
         self._refresh_filter_controls()
@@ -444,6 +464,8 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
+        # Применить режим интерфейса (простой/расширенный)
+        self._apply_ui_mode()
 
     def _build_search_tab(self) -> QWidget:
         w = QWidget()
@@ -528,11 +550,11 @@ class MainWindow(QMainWindow):
         add(QKeySequence.StandardKey.Find, self._focus_search)
         add(QKeySequence("Ctrl+K"), self._quick_search)
         add(QKeySequence("Ctrl+B"), self._toggle_bookmark_active)
-        add(QKeySequence("Ctrl+1"), lambda: self.tabs.setCurrentIndex(0))
-        add(QKeySequence("Ctrl+2"), lambda: self.tabs.setCurrentIndex(1))
-        add(QKeySequence("Ctrl+3"), lambda: self.tabs.setCurrentIndex(2))
-        add(QKeySequence("Ctrl+4"), lambda: self.tabs.setCurrentIndex(3))
-        add(QKeySequence("Ctrl+5"), lambda: self.tabs.setCurrentIndex(4))
+        add(QKeySequence("Ctrl+1"), lambda: self._switch_tab(0))
+        add(QKeySequence("Ctrl+2"), lambda: self._switch_tab(1))
+        add(QKeySequence("Ctrl+3"), lambda: self._switch_tab(2))
+        add(QKeySequence("Ctrl+4"), lambda: self._switch_tab(3))
+        add(QKeySequence("Ctrl+5"), lambda: self._switch_tab(4))
         add(QKeySequence.StandardKey.ZoomIn, lambda: self.set_zoom(self.zoom + ZOOM_STEP))
         add(QKeySequence("Ctrl+="), lambda: self.set_zoom(self.zoom + ZOOM_STEP))
         add(QKeySequence.StandardKey.ZoomOut, lambda: self.set_zoom(self.zoom - ZOOM_STEP))
@@ -541,6 +563,59 @@ class MainWindow(QMainWindow):
         add(QKeySequence.StandardKey.Redo, self.redo)
         add(QKeySequence("F5"), self._force_refresh_active_tab)
         logger.info("Hotkeys registered")
+
+    # ---- UI Modes: Simple / Advanced ----
+    def _switch_tab(self, index: int):
+        """Переключить вкладку с учётом скрытых (простой режим)."""
+        if 0 <= index < self.tabs.count() and self.tabs.isTabVisible(index):
+            self.tabs.setCurrentIndex(index)
+
+    def _change_ui_mode(self):
+        mode = self.cmb_ui_mode.currentData()
+        if mode == self.ui_mode:
+            return
+        self.ui_mode = mode
+        self.settings.setValue("ui/mode", mode)
+        self._apply_ui_mode()
+        self.statusBar().showMessage(
+            self.tr("ui_mode_switched_simple" if mode == "simple" else "ui_mode_switched_advanced"),
+            3000,
+        )
+
+    def _apply_ui_mode(self):
+        """Простой режим скрывает перегружающие контролы; расширенный — показывает всё."""
+        simple = self.ui_mode == "simple"
+
+        # Панель действий: в простом режиме — только открытие и экспорт
+        for w in (self.btn_copy, self.btn_export_all, self.b_sep, self.btn_org):
+            w.setVisible(not simple)
+
+        # Панель вид: остаются язык и тема
+        for w in (self.chk_view_md, self.chk_view_th, self.chk_virtual, self.btn_collapse, *self._zoom_widgets):
+            w.setVisible(not simple)
+
+        # Слева: без диагностики и фильтров категорий/тегов (текстовый фильтр остаётся)
+        self.chk_show_ext.setVisible(not simple)
+        self.chk_show_diag.setVisible(not simple)
+        try:
+            self._filter_form.setRowVisible(self.cmb_filter_cat, not simple)
+            self._filter_form.setRowVisible(self.cmb_filter_tag, not simple)
+        except AttributeError:
+            # Qt < 6.4: хотя бы прячем сами виджеты
+            for w in (self.cmb_filter_cat, self.cmb_filter_tag):
+                w.setVisible(not simple)
+
+        # Вкладки: в простом режиме — «Книга» (2) и «Поиск» (4)
+        self.tabs.setTabVisible(0, not simple)  # Карточки
+        self.tabs.setTabVisible(1, not simple)  # Виртуализация
+        self.tabs.setTabVisible(2, True)        # Книга
+        self.tabs.setTabVisible(3, not simple)  # Исходник
+        self.tabs.setTabVisible(4, True)        # Поиск
+        if simple and not self.tabs.isTabVisible(self.tabs.currentIndex()):
+            self.tabs.setCurrentIndex(2)
+
+        # Панель инструментов «Книги»: скрыть типографику в простом режиме
+        self.reader_view.set_simple_mode(simple)
 
     # ---- Lazy Tab Management (Zero Lags!) ----
     def _mark_all_tabs_dirty(self):
